@@ -22,18 +22,21 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.22.2'
           channel: 'stable'
           cache: true
 
-      - name: Recreate Android Project & Sync Code
+      - name: Accept Android Licenses & Build APK
         run: |
+          yes | flutter doctor --android-licenses || true
           mkdir temp_app
           cd temp_app
           flutter create --org com.buseye.app --project-name buseye_app .
           cp -f ../pubspec.yaml ./pubspec.yaml
-          cp -rf ../lib ./
+          rm -rf ./lib
+          cp -rf ../lib ./lib
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
