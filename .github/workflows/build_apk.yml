@@ -2,50 +2,41 @@ name: Build BusEye APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.x'
           channel: 'stable'
+          cache: true
 
-      - name: Create Android Platform Template & Permissions
+      - name: Recreate Android Project & Sync Code
         run: |
-          mkdir -p ../temp_backup
-          cp -r lib ../temp_backup/
-          cp pubspec.yaml ../temp_backup/
-          
-          cd ..
-          flutter create --org com.buseye.app buseye_temp
-          cd buseye_temp
-          
-          cp -r ../temp_backup/lib/* ./lib/
-          cp ../temp_backup/pubspec.yaml ./pubspec.yaml
-          
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
-          
+          mkdir temp_app
+          cd temp_app
+          flutter create --org com.buseye.app --project-name buseye_app .
+          cp -f ../pubspec.yaml ./pubspec.yaml
+          cp -rf ../lib ./
           flutter pub get
           flutter build apk --release
-          
-          mkdir -p $GITHUB_WORKSPACE/build_output
-          cp build/app/outputs/flutter-apk/app-release.apk $GITHUB_WORKSPACE/build_output/
 
-      - name: Upload BusEye APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BusEye-82A-Release-APK
-          path: build_output/app-release.apk
+          name: app-release
+          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
