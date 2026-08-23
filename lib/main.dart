@@ -57,11 +57,15 @@ class _BusEyeScreenState extends State<BusEyeScreen> {
     if (permission == LocationPermission.denied) {
       await Geolocator.requestPermission();
     }
+    // 1km/h 단위 실시간 정밀 갱신 (거리 필터 0m, 고정밀 수신)
     Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 1),
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+      ),
     ).listen((pos) {
       setState(() {
-        _speed = (pos.speed >= 0) ? (pos.speed * 3.6) : 0.0;
+        _speed = (pos.speed > 0) ? (pos.speed * 3.6) : 0.0;
       });
     });
   }
@@ -156,7 +160,7 @@ class _BusEyeScreenState extends State<BusEyeScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       color: Colors.black54,
-                      child: Text("${_speed.toStringAsFixed(0)} km/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 20, fontWeight: FontWeight.bold)),
+                      child: Text("${_speed.toStringAsFixed(0)} km/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 22, fontWeight: FontWeight.bold)),
                     ),
                   )
                 ],
