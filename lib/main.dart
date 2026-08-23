@@ -33,8 +33,8 @@ class BusEyeMainScreen extends StatefulWidget {
 
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts flutterTts = FlutterTts();
-  
-  // 속도계 보간 엔진 변수
+
+  // 속도계 보간 변수
   double _displaySpeed = 0.0;
   double _targetSpeed = 0.0;
   Position? _lastPos;
@@ -45,10 +45,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   bool _isRec = false;
   int _recSeconds = 0;
   Timer? _recTimer;
-  String _statusMsg = "블랙박스 Wi-Fi 스트림 및 GPS 대기 중";
+  String _statusMsg = "블랙박스 Wi-Fi 및 초정밀 GPS 대기 중";
   Color _statusColor = Colors.cyanAccent;
-  
-  // 블박 Wi-Fi 연결 플래그
   bool _isBlackboxConnected = false;
 
   @override
@@ -64,7 +62,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     await flutterTts.setSpeechRate(0.5);
   }
 
-  // 1km/h 단위 100ms 초정밀 보간
+  // 100ms(0.1초) 주기로 1km/h 단위 부드러운 수렴
   void _startSpeedInterpolation() {
     _smoothingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if ((_displaySpeed - _targetSpeed).abs() > 0.2) {
@@ -85,12 +83,11 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       await Geolocator.requestPermission();
     }
 
+    // 표준 고정밀 네비게이션 스트림
     Geolocator.getPositionStream(
-      locationSettings: const AndroidSettings(
+      locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
-        intervalDuration: Duration(milliseconds: 250),
-        forceLocationManager: true,
       ),
     ).listen((pos) {
       DateTime now = DateTime.now();
@@ -98,8 +95,10 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
       if (_lastPos != null && _lastTime != null) {
         double d = Geolocator.distanceBetween(
-          _lastPos!.latitude, _lastPos!.longitude,
-          pos.latitude, pos.longitude,
+          _lastPos!.latitude,
+          _lastPos!.longitude,
+          pos.latitude,
+          pos.longitude,
         );
         double dt = now.difference(_lastTime!).inMilliseconds / 1000.0;
         if (dt > 0.05) {
@@ -144,7 +143,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
         flutterTts.speak("실차 주행 실증 녹화를 시작합니다.");
       } else {
         _recTimer?.cancel();
-        flutterTts.speak("주행 실증 로그 및 영상이 저장되었습니다.");
+        flutterTts.speak("주행 실증 로그가 저장되었습니다.");
       }
     });
   }
@@ -159,8 +158,12 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     }
   }
 
-  // 실증 결과 QR 코드 팝업 다이얼로그
+  // 실증 데이터 검증 QR 팝업 (네이버 MYBOX/클라우드 링크 연결용)
   void _showQrDialog() {
+    // 네이버 MYBOX 또는 실증 검증용 URL
+    final qrData = Uri.encodeComponent("https://mybox.naver.com");
+    final qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$qrData";
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -170,14 +173,21 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
-              child: const Icon(Icons.qr_code_2, size: 140, color: Colors.black),
+              child: Image.network(
+                qrApiUrl,
+                width: 160,
+                height: 160,
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.qr_code_2, size: 160, color: Colors.black),
+              ),
             ),
             const SizedBox(height: 12),
-            Text("노선: 82A / 승용차 실증\n녹화시간: ${_recSeconds}초\n최고속도: ${_displaySpeed.toInt()} km/h",
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            Text(
+              "노선: 82A / 승용차 실증\n녹화시간: ${_recSeconds}초 | 최고속도: ${_displaySpeed.toInt()} km/h\n(스캔 시 실증 데이터 클라우드로 연결)",
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
           ],
         ),
         actions: [
@@ -227,7 +237,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       ),
       body: Column(
         children: [
-          // 블박 수신 모니터링 뷰 (폰 촬영 배제)
           Expanded(
             flex: 5,
             child: Container(
@@ -277,8 +286,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
           ),
-
-          // 상태 메시지 창
           Container(
             width: double.infinity,
             margin: const EdgeInsets.symmetric(horizontal: 10),
@@ -290,8 +297,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
             ),
             child: Text(_statusMsg, textAlign: TextAlign.center, style: TextStyle(color: _statusColor, fontSize: 14, fontWeight: FontWeight.bold)),
           ),
-
-          // 컨트롤 패널
           Padding(
             padding: const EdgeInsets.all(10),
             child: Column(
@@ -301,7 +306,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                     Expanded(
                       child: ElevatedButton.icon(
                         icon: Icon(_isBlackboxConnected ? Icons.link_off : Icons.wifi_tethering),
-                        label: Text(_isBlackboxConnected ? "블박 스트림 해제" : "블박 스트림 연동"),
+                        label: Text(_isBlackboxConnected ? "블박 해제" : "블박 연동"),
                         style: ElevatedButton.styleFrom(backgroundColor: _isBlackboxConnected ? Colors.teal[800] : Colors.blueGrey[800]),
                         onPressed: _toggleBlackboxConnection,
                       ),
