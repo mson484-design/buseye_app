@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
 void main() {
-  runApp(const BusEye82AApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const BusEyeApp());
 }
 
-class BusEye82AApp extends StatelessWidget {
-  const BusEye82AApp({super.key});
+class BusEyeApp extends StatelessWidget {
+  const BusEyeApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -14,283 +17,209 @@ class BusEye82AApp extends StatelessWidget {
       title: 'BusEye 82A',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
-        primaryColor: const Color(0xFF0284C7),
+        scaffoldBackgroundColor: const Color(0xFF0B1120),
       ),
-      home: const BusEyeMainScreen(),
+      home: const BusEyeScreen(),
     );
   }
 }
 
-class BusEyeMainScreen extends StatefulWidget {
-  const BusEyeMainScreen({super.key});
+class BusEyeScreen extends StatefulWidget {
+  const BusEyeScreen({super.key});
 
   @override
-  State<BusEyeMainScreen> createState() => _BusEyeMainScreenState();
+  State<BusEyeScreen> createState() => _BusEyeScreenState();
 }
 
-class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
-  int _speed = 0;
-  bool _isMuted = false;
-  String _alertMessage = "정상 주행 중 (안전거리 확보)";
-  Color _alertColor = Colors.greenAccent;
-  Timer? _simTimer;
+class _BusEyeScreenState extends State<BusEyeScreen> {
+  final FlutterTts flutterTts = FlutterTts();
+  double _speed = 0.0;
+  bool _isRec = false;
+  String _status = "정상 주행 모니터링 중";
+  Color _statusColor = Colors.greenAccent;
+  int _recTime = 0;
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    _startSpeedSimulation();
+    _initTts();
+    _initGps();
   }
 
-  void _startSpeedSimulation() {
-    _simTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
-      if (!mounted) return;
+  void _initTts() async {
+    await flutterTts.setLanguage("ko-KR");
+    await flutterTts.setSpeechRate(0.5);
+  }
+
+  Future<void> _initGps() async {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      await Geolocator.requestPermission();
+    }
+    Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 1),
+    ).listen((pos) {
       setState(() {
-        _speed = (_speed + 5) % 50;
-        if (_speed >= 40) {
-          _alertMessage = "과속 경고: 구간 제한속도 준수 요망";
-          _alertColor = Colors.redAccent;
-        } else if (_speed >= 25) {
-          _alertMessage = "우측 사각지대 이륜차 주의";
-          _alertColor = Colors.amberAccent;
-        } else {
-          _alertMessage = "정상 주행 중 (82A 안전 운행)";
-          _alertColor = Colors.greenAccent;
-        }
+        _speed = (pos.speed >= 0) ? (pos.speed * 3.6) : 0.0;
       });
     });
   }
 
-  @override
-  void dispose() {
-    _simTimer?.cancel();
-    super.dispose();
+  void _toggleRec() {
+    setState(() {
+      _isRec = !_isRec;
+      if (_isRec) {
+        _recTime = 0;
+        _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+          setState(() => _recTime++);
+        });
+        flutterTts.speak("실차 주행 실증 녹화를 시작합니다.");
+      } else {
+        _timer?.cancel();
+        flutterTts.speak("주행 영상이 저장되었습니다.");
+      }
+    });
   }
 
-  void _triggerAnnouncement(String title, String message, Color color) {
+  void _alert(String msg, Color color, String voice) {
     setState(() {
-      _alertMessage = "[$title] $message";
-      _alertColor = color;
+      _status = msg;
+      _statusColor = color;
     });
+    if (voice.isNotEmpty) {
+      flutterTts.speak(voice);
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    flutterTts.stop();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    int m = _recTime ~/ 60;
+    int s = _recTime % 60;
+    String timerStr = '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+
     return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(12.0),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E293B),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.blueGrey.shade700),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: const [
-                        Text(
-                          "BusEye 82A",
-                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.lightBlueAccent),
-                        ),
-                        Text(
-                          "노선: 82A (실차 모니터링)",
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.black45,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: _alertColor),
-                          ),
-                          child: Row(
-                            children: [
-                              Text(
-                                "$_speed",
-                                style: TextStyle(
-                                  fontSize: 26,
-                                  fontWeight: FontWeight.w900,
-                                  color: _alertColor,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              const Text("km/h", style: TextStyle(fontSize: 12, color: Colors.white70)),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        IconButton(
-                          icon: Icon(_isMuted ? Icons.volume_off : Icons.volume_up),
-                          color: _isMuted ? Colors.red : Colors.white,
-                          onPressed: () {
-                            setState(() {
-                              _isMuted = !_isMuted;
-                            });
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text("BusEye 82A 실차 안전 시스템", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        actions: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+            decoration: BoxDecoration(
+              color: _isRec ? Colors.red : Colors.grey[800],
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.fiber_manual_record, color: _isRec ? Colors.white : Colors.white54, size: 12),
+                const SizedBox(width: 4),
+                Text(_isRec ? "REC $timerStr" : "대기", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              ],
+            ),
+          )
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 5,
+            child: Container(
+              margin: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _statusColor, width: 2),
               ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.black,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
-                        ),
-                        child: Stack(
-                          children: [
-                            const Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.videocam_outlined, size: 40, color: Colors.white38),
-                                  SizedBox(height: 6),
-                                  Text("CAM 1: 전방 추돌 감지", style: TextStyle(color: Colors.white60, fontSize: 12)),
-                                ],
-                              ),
-                            ),
-                            Positioned(
-                              top: 8,
-                              left: 8,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                color: Colors.red.withOpacity(0.8),
-                                child: const Text("LIVE", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.black,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
-                        ),
-                        child: Stack(
-                          children: [
-                            const Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.person_pin_outlined, size: 40, color: Colors.white38),
-                                  SizedBox(height: 6),
-                                  Text("CAM 2: 승객 전도 감지", style: TextStyle(color: Colors.white60, fontSize: 12)),
-                                ],
-                              ),
-                            ),
-                            Positioned(
-                              top: 8,
-                              left: 8,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                color: Colors.green.withOpacity(0.8),
-                                child: const Text("AI ON", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
-                decoration: BoxDecoration(
-                  color: _alertColor.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: _alertColor),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.warning_amber_rounded, color: _alertColor),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _alertMessage,
-                        style: TextStyle(color: _alertColor, fontWeight: FontWeight.bold, fontSize: 14),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
+              child: Stack(
                 children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFE11D48),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      icon: const Icon(Icons.record_voice_over, color: Colors.white),
-                      label: const Text("승객 전도 방지", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      onPressed: () {
-                        _triggerAnnouncement("승객 안내", "손잡이를 꼭 잡아주시기 바랍니다.", Colors.orangeAccent);
-                      },
+                  Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: const [
+                        Icon(Icons.videocam, color: Colors.cyanAccent, size: 40),
+                        SizedBox(height: 6),
+                        Text("블랙박스 / 주행 화면 실시간 AI 감시", style: TextStyle(color: Colors.white70, fontSize: 13)),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFD97706),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      icon: const Icon(Icons.two_wheeler, color: Colors.white),
-                      label: const Text("우측 오토바이", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      onPressed: () {
-                        _triggerAnnouncement("측방 경고", "우측 사각지대에 이륜차가 접근 중입니다.", Colors.redAccent);
-                      },
+                  Positioned(
+                    bottom: 10,
+                    left: 10,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      color: Colors.black54,
+                      child: Text("${_speed.toStringAsFixed(0)} km/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 20, fontWeight: FontWeight.bold)),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF2563EB),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      icon: const Icon(Icons.check_circle_outline, color: Colors.white),
-                      label: const Text("정상 리셋", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      onPressed: () {
-                        _triggerAnnouncement("안내", "정상 주행 상태로 전환되었습니다.", Colors.greenAccent);
-                      },
-                    ),
-                  ),
+                  )
                 ],
               ),
-            ],
+            ),
           ),
-        ),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: _statusColor.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: _statusColor),
+            ),
+            child: Text(_status, textAlign: TextAlign.center, style: TextStyle(color: _statusColor, fontSize: 15, fontWeight: FontWeight.bold)),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  height: 46,
+                  child: ElevatedButton.icon(
+                    icon: Icon(_isRec ? Icons.stop : Icons.play_arrow),
+                    label: Text(_isRec ? "실증 영상 녹화 종료 (저장)" : "실증 영상 녹화 시작", style: const TextStyle(fontWeight: FontWeight.bold)),
+                    style: ElevatedButton.styleFrom(backgroundColor: _isRec ? Colors.red[800] : Colors.blueAccent[700]),
+                    onPressed: _toggleRec,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red[900]),
+                        onPressed: () => _alert("승객 미착석 출발 주의", Colors.redAccent, "승객이 아직 착석하지 않았습니다. 천천히 출발하세요."),
+                        child: const Text("승객 전도", style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.orange[900]),
+                        onPressed: () => _alert("우측 사각지대 오토바이 감지", Colors.orangeAccent, "우측 사각지대에 오토바이가 접근 중입니다."),
+                        child: const Text("오토바이", style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[800]),
+                        onPressed: () => _alert("정상 주행 모니터링 중", Colors.greenAccent, ""),
+                        child: const Text("리셋", style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
+                )
+              ],
+            ),
+          )
+        ],
       ),
     );
   }
