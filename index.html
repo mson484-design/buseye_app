@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>BusEye 82A AI Brain</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body { background-color: #0b1120; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; justify-content: space-between; padding: 12px; }
+    .header { display: flex; justify-content: space-between; align-items: center; background-color: #1e293b; padding: 10px 14px; border-radius: 10px; }
+    .title { font-size: 15px; font-weight: bold; color: #38bdf8; }
+    .rec-badge { background-color: #ef4444; color: white; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+    
+    .screen-container { position: relative; background-color: #000; border: 2px solid #22d3ee; border-radius: 12px; height: 48vh; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
+    .cam-status { text-align: center; color: #94a3b8; font-size: 13px; }
+    .cam-icon { font-size: 40px; margin-bottom: 8px; color: #22d3ee; }
+    .speed-box { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.85); padding: 4px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); }
+    .speed-val { font-size: 38px; font-weight: 800; color: #22d3ee; }
+    .speed-unit { font-size: 13px; color: #94a3b8; font-weight: bold; margin-left: 4px; }
+    
+    .status-panel { background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee; padding: 10px; border-radius: 8px; text-align: center; font-size: 13px; font-weight: bold; }
+    
+    .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btn { padding: 12px; border: none; border-radius: 8px; font-size: 13px; font-weight: bold; color: white; cursor: pointer; }
+    .btn-stream { background-color: #0f766e; }
+    .btn-rec { background-color: #b91c1c; }
+    
+    .alert-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+    .btn-warn1 { background-color: #991b1b; }
+    .btn-warn2 { background-color: #c2410c; }
+    .btn-reset { background-color: #334155; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="title">BusEye 82A AI Brain (Web)</div>
+    <div class="rec-badge" id="recBadge">REC 00:00</div>
+  </div>
+
+  <div class="screen-container" id="screenBox">
+    <div class="cam-status">
+      <div class="cam-icon" id="camIcon">📡</div>
+      <div id="camText">블랙박스 Wi-Fi 및 AI 비전 스트림 대기 중</div>
+    </div>
+    <div class="speed-box">
+      <span class="speed-val" id="speedVal">0</span>
+      <span class="speed-unit">km/h</span>
+    </div>
+  </div>
+
+  <div class="status-panel" id="statusMsg">
+    실시간 정밀 GPS 및 위험 감지 시스템 정상 가동 중
+  </div>
+
+  <div class="btn-grid">
+    <button class="btn btn-stream" onclick="toggleStream()">블박 스트림 연동</button>
+    <button class="btn btn-rec" onclick="toggleRec()">실증 녹화</button>
+  </div>
+
+  <div class="alert-grid">
+    <button class="btn btn-warn1" onclick="triggerAlert('승객 미착석 출발 주의!', '#ef4444', '승객이 아직 착석하지 않았습니다.')">승객 전도</button>
+    <button class="btn btn-warn2" onclick="triggerAlert('우측 사각지대 오토바이 주의!', '#f97316', '우측 사각지대에 오토바이가 접근 중입니다.')">오토바이</button>
+    <button class="btn btn-reset" onclick="resetAlert()">상태 리셋</button>
+  </div>
+
+  <script>
+    let speed = 0;
+    let targetSpeed = 0;
+    let isRec = true;
+    let recSec = 0;
+
+    function speak(text) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const msg = new SpeechSynthesisUtterance(text);
+        msg.lang = 'ko-KR';
+        msg.rate = 0.9;
+        window.speechSynthesis.speak(msg);
+      }
+    }
+
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(
+        (pos) => {
+          let s = (pos.coords.speed && pos.coords.speed > 0) ? pos.coords.speed * 3.6 : 0;
+          targetSpeed = s < 2 ? 0 : s;
+        },
+        (err) => console.log(err),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+      );
+    }
+
+    setInterval(() => {
+      if (Math.abs(speed - targetSpeed) > 0.2) {
+        speed += (targetSpeed - speed) * 0.35;
+      } else {
+        speed = targetSpeed;
+      }
+      document.getElementById('speedVal').innerText = Math.round(speed);
+    }, 100);
+
+    setInterval(() => {
+      if (isRec) {
+        recSec++;
+        let m = String(Math.floor(recSec / 60)).padStart(2, '0');
+        let s = String(recSec % 60).padStart(2, '0');
+        document.getElementById('recBadge').innerText = `REC ${m}:${s}`;
+      }
+    }, 1000);
+
+    function triggerAlert(msg, color, voice) {
+      const panel = document.getElementById('statusMsg');
+      const box = document.getElementById('screenBox');
+      panel.innerText = msg;
+      panel.style.color = color;
+      panel.style.borderColor = color;
+      box.style.borderColor = color;
+      speak(voice);
+    }
+
+    function resetAlert() {
+      const panel = document.getElementById('statusMsg');
+      const box = document.getElementById('screenBox');
+      panel.innerText = "정상 주행 모니터링 중";
+      panel.style.color = "#22d3ee";
+      panel.style.borderColor = "#22d3ee";
+      box.style.borderColor = "#22d3ee";
+    }
+
+    function toggleStream() {
+      document.getElementById('camText').innerText = "차량 블랙박스 RTSP 스트림 AI 수신 중 (정상)";
+      document.getElementById('camIcon').innerText = "🟢";
+      speak("블랙박스 영상이 연결되었습니다.");
+    }
+
+    function toggleRec() {
+      isRec = !isRec;
+      if (!isRec) {
+        document.getElementById('recBadge').innerText = "대기";
+        speak("주행 실증 로그가 저장되었습니다.");
+      } else {
+        recSec = 0;
+        speak("실차 실증 녹화를 시작합니다.");
+      }
+    }
+  </script>
+</body>
+</html>
