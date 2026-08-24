@@ -34,7 +34,7 @@ class BusEyeMainScreen extends StatefulWidget {
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts flutterTts = FlutterTts();
 
-  // 속도계 보간 변수
+  // 속도계 보간 엔진 변수 (1km/h 단위)
   double _displaySpeed = 0.0;
   double _targetSpeed = 0.0;
   Position? _lastPos;
@@ -62,7 +62,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     await flutterTts.setSpeechRate(0.5);
   }
 
-  // 100ms(0.1초) 주기로 1km/h 단위 부드러운 수렴
   void _startSpeedInterpolation() {
     _smoothingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if ((_displaySpeed - _targetSpeed).abs() > 0.2) {
@@ -83,7 +82,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       await Geolocator.requestPermission();
     }
 
-    // 표준 고정밀 네비게이션 스트림
     Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.bestForNavigation,
@@ -158,33 +156,37 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     }
   }
 
-  // 실증 데이터 검증 QR 팝업 (네이버 MYBOX/클라우드 링크 연결용)
+  // 실증 네이버 QR 코드 팝업 (고해상도 다이얼로그)
   void _showQrDialog() {
-    // 네이버 MYBOX 또는 실증 검증용 URL
-    final qrData = Uri.encodeComponent("https://mybox.naver.com");
-    final qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$qrData";
+    // 네이버 MYBOX 공유 주소 또는 생성하신 네이버 QR 주소
+    const naverShareUrl = "https://mybox.naver.com";
+    final qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${Uri.encodeComponent(naverShareUrl)}";
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E293B),
-        title: const Text("실차 실증 데이터 검증 QR", style: TextStyle(color: Colors.white, fontSize: 16)),
+        title: const Text("네이버 실증 데이터 검증 QR", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.greenAccent, width: 2),
+              ),
               child: Image.network(
                 qrApiUrl,
-                width: 160,
-                height: 160,
-                errorBuilder: (context, error, stackTrace) => const Icon(Icons.qr_code_2, size: 160, color: Colors.black),
+                width: 170,
+                height: 170,
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.qr_code_2, size: 170, color: Colors.black),
               ),
             ),
             const SizedBox(height: 12),
             Text(
-              "노선: 82A / 승용차 실증\n녹화시간: ${_recSeconds}초 | 최고속도: ${_displaySpeed.toInt()} km/h\n(스캔 시 실증 데이터 클라우드로 연결)",
+              "노선: 82A / 승용차 실증 데이터\n녹화시간: ${_recSeconds}초 | 최고속도: ${_displaySpeed.toInt()} km/h\n[스마트폰 카메라로 스캔 시 즉시 연결]",
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
@@ -193,7 +195,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text("닫기", style: TextStyle(color: Colors.cyanAccent)),
+            child: const Text("닫기", style: TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
           )
         ],
       ),
@@ -220,8 +222,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
         title: const Text("BusEye 82A AI Brain", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.qr_code, color: Colors.cyanAccent),
-            tooltip: "실증 QR 확인",
+            icon: const Icon(Icons.qr_code_2, color: Colors.greenAccent, size: 28),
+            tooltip: "네이버 실증 QR 확인",
             onPressed: _showQrDialog,
           ),
           Container(
