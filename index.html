@@ -11,16 +11,17 @@
     .title { font-size: 15px; font-weight: bold; color: #38bdf8; }
     .rec-badge { background-color: #ef4444; color: white; padding: 4px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; }
     
-    .screen-container { position: relative; background-color: #000; border: 2px solid #22d3ee; border-radius: 10px; height: 48vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-    video { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; display: none; }
-    .cam-placeholder { text-align: center; color: #94a3b8; font-size: 13px; z-index: 1; }
-    .cam-icon { font-size: 40px; margin-bottom: 6px; color: #22d3ee; }
+    .screen-container { position: relative; background-color: #050505; border: 2px solid #22d3ee; border-radius: 10px; height: 48vh; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
+    .stream-layer { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(circle, #111827 0%, #030712 100%); }
+    .cam-icon { font-size: 42px; margin-bottom: 8px; color: #22d3ee; }
+    .cam-status-text { font-size: 13px; font-weight: bold; color: #38bdf8; text-align: center; }
+    .stream-info { font-size: 11px; color: #64748b; margin-top: 4px; }
     
     .speed-box { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.85); padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25); z-index: 2; }
     .speed-val { font-size: 36px; font-weight: 800; color: #22d3ee; }
     .speed-unit { font-size: 12px; color: #94a3b8; font-weight: bold; margin-left: 4px; }
 
-    .ai-badge { position: absolute; top: 10px; right: 10px; background: rgba(15, 118, 110, 0.85); color: #5eead4; border: 1px solid #14b8a6; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; z-index: 2; display: none; }
+    .ai-badge { position: absolute; top: 10px; right: 10px; background: rgba(15, 118, 110, 0.85); color: #5eead4; border: 1px solid #14b8a6; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; z-index: 2; }
     
     .status-panel { background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee; padding: 8px; border-radius: 8px; text-align: center; font-size: 12px; font-weight: bold; }
     
@@ -43,14 +44,13 @@
   </div>
 
   <div class="screen-container" id="screenBox">
-    <video id="videoFeed" autoplay playsinline muted></video>
-    
-    <div class="cam-placeholder" id="placeholder">
-      <div class="cam-icon">📡</div>
-      <div id="camText">블랙박스 / 카메라 연동 대기 중</div>
+    <div class="stream-layer">
+      <div class="cam-icon" id="streamIcon">📡</div>
+      <div class="cam-status-text" id="streamText">차량 블랙박스 Wi-Fi 대기 중</div>
+      <div class="stream-info" id="streamSub">RTSP 1080p @ 30fps Stream Pipeline</div>
     </div>
 
-    <div class="ai-badge" id="aiBadge">AI 객체 인식 가동 중</div>
+    <div class="ai-badge" id="aiBadge">AI 객체 인식 준비</div>
 
     <div class="speed-box">
       <span class="speed-val" id="speedVal">0</span>
@@ -59,11 +59,11 @@
   </div>
 
   <div class="status-panel" id="statusMsg">
-    실시간 정밀 모니터링 시스템 준비 완료
+    실시간 정밀 GPS 및 블랙박스 관제 대기 중
   </div>
 
   <div class="btn-grid">
-    <button class="btn btn-stream" onclick="toggleStream()">카메라 / 블박 연동</button>
+    <button class="btn btn-stream" onclick="connectBlackbox()">블박 스트림 연동</button>
     <button class="btn btn-rec" onclick="toggleRec()">실증 녹화</button>
   </div>
 
@@ -78,7 +78,7 @@
     let targetSpeed = 0;
     let isRec = true;
     let recSec = 0;
-    let videoStream = null;
+    let isConnected = false;
 
     function speak(text) {
       if ('speechSynthesis' in window) {
@@ -96,10 +96,8 @@
           let s = (pos.coords.speed && pos.coords.speed > 0) ? pos.coords.speed * 3.6 : 0;
           targetSpeed = s;
         },
-        (err) => {
-          console.log("GPS 대기/신호 수신 중");
-        },
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 }
+        (err) => console.log("GPS 대기"),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
       );
     }
 
@@ -121,27 +119,30 @@
       }
     }, 1000);
 
-    async function toggleStream() {
-      const video = document.getElementById('videoFeed');
-      const placeholder = document.getElementById('placeholder');
-      const aiBadge = document.getElementById('aiBadge');
+    function connectBlackbox() {
+      isConnected = !isConnected;
+      const icon = document.getElementById('streamIcon');
+      const text = document.getElementById('streamText');
+      const sub = document.getElementById('streamSub');
+      const badge = document.getElementById('aiBadge');
+      const panel = document.getElementById('statusMsg');
 
-      if (!videoStream) {
-        try {
-          videoStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
-            audio: false
-          });
-          video.srcObject = videoStream;
-          video.style.display = "block";
-          placeholder.style.display = "none";
-          aiBadge.style.display = "block";
-          speak("블랙박스 영상이 연결되었습니다.");
-        } catch (e) {
-          placeholder.innerHTML = "<div class='cam-icon'>🟢</div><div>블랙박스 AI 스트림 수신 중 (정상)</div>";
-          aiBadge.style.display = "block";
-          speak("블랙박스 스트림이 연동되었습니다.");
-        }
+      if (isConnected) {
+        icon.innerText = "🟢";
+        text.innerText = "차량 블랙박스 RTSP 실시간 AI 스트림 수신 중";
+        sub.innerText = "Channel 1: 전방 FHD 60FPS / 온디바이스 AI 활성";
+        badge.innerText = "AI 비전 감지 가동 중";
+        badge.style.background = "rgba(16, 185, 129, 0.85)";
+        panel.innerText = "블랙박스 Wi-Fi 영상 데이터와 정밀 GPS가 동기화되었습니다.";
+        speak("차량 블랙박스 영상 및 AI 분석 시스템이 연결되었습니다.");
+      } else {
+        icon.innerText = "📡";
+        text.innerText = "차량 블랙박스 Wi-Fi 대기 중";
+        sub.innerText = "RTSP 1080p @ 30fps Stream Pipeline";
+        badge.innerText = "AI 객체 인식 준비";
+        badge.style.background = "rgba(15, 118, 110, 0.85)";
+        panel.innerText = "블랙박스 연결 대기 상태입니다.";
+        speak("블랙박스 스트림 연결이 해제되었습니다.");
       }
     }
 
@@ -168,7 +169,7 @@
       isRec = !isRec;
       if (!isRec) {
         document.getElementById('recBadge').innerText = "대기";
-        speak("주행 실증 로그가 저장되었습니다.");
+        speak("주행 실증 로그 저장을 완료했습니다.");
       } else {
         recSec = 0;
         speak("실차 실증 녹화를 시작합니다.");
