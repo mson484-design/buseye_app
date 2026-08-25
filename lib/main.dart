@@ -28,23 +28,20 @@ class LiveViewScreen extends StatefulWidget {
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
   static const platform = MethodChannel('com.buseye.app/live');
-  String _status = "캐치온 블랙박스 영상 수신 중...";
+  String _status = "대기 중 (버튼을 눌러 음성 및 연결 테스트)";
 
-  @override
-  void initState() {
-    super.initState();
-    _startNativeLiveStream();
-  }
-
-  Future<void> _startNativeLiveStream() async {
+  Future<void> _triggerAudioAndStream() async {
+    setState(() {
+      _status = "명령 전송 중...";
+    });
     try {
-      await platform.invokeMethod('startLiveStream');
+      final String result = await platform.invokeMethod('startLiveStream');
       setState(() {
-        _status = "정상 주행 관제 중 (캐치온 3CH 실시간 수신)";
+        _status = "정상 작동 중 ($result)";
       });
     } catch (e) {
       setState(() {
-        _status = "연결 상태 확인 중: rtsp://192.168.1.1:554/live/ch0";
+        _status = "오류 발생: $e";
       });
     }
   }
@@ -57,7 +54,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
         child: Column(
           children: [
             Container(
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
               color: const Color(0xFF0F172A),
               child: Row(
                 children: [
@@ -76,7 +73,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                       border: Border.all(color: Colors.greenAccent),
                     ),
                     child: const Text(
-                      "LIVE 3CH",
+                      "LIVE READY",
                       style: TextStyle(color: Colors.greenAccent, fontSize: 12, fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -85,7 +82,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
             ),
             Expanded(
               child: Container(
-                margin: const EdgeInsets.all(12),
+                margin: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E293B),
                   borderRadius: BorderRadius.circular(16),
@@ -95,23 +92,30 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.videocam, size: 64, color: Colors.cyanAccent),
-                      const SizedBox(height: 16),
-                      Text(
-                        _status,
-                        style: const TextStyle(color: Colors.white, fontSize: 16),
-                        textAlign: TextAlign.center,
-                      ),
+                      const Icon(Icons.volume_up, size: 72, color: Colors.cyanAccent),
                       const SizedBox(height: 20),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: Text(
+                          _status,
+                          style: const TextStyle(color: Colors.white, fontSize: 16),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      const SizedBox(height: 30),
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.cyan,
+                          backgroundColor: Colors.cyanAccent,
                           foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                        onPressed: _startNativeLiveStream,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text("영상 강제 재연결", style: TextStyle(fontWeight: FontWeight.bold)),
+                        onPressed: _triggerAudioAndStream,
+                        icon: const Icon(Icons.play_arrow, size: 28),
+                        label: const Text(
+                          "영상 및 음성 강제 실행",
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
                       ),
                     ],
                   ),
