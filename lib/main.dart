@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,16 +27,38 @@ class LiveViewScreen extends StatefulWidget {
 }
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
-  String _status = "대기 중 (버튼을 눌러 음성 및 연결 테스트)";
+  final FlutterTts _flutterTts = FlutterTts();
+  String _status = "대기 중 (버튼을 누르면 음성이 나옵니다)";
 
-  void _triggerAudioAndStream() {
-    // 시스템 피드백 비프음 및 진동 즉시 발생
-    HapticFeedback.heavyImpact();
-    SystemSound.play(SystemSoundType.click);
+  @override
+  void initState() {
+    super.initState();
+    _initTts();
+  }
+
+  Future<void> _initTts() async {
+    await _flutterTts.setLanguage("ko-KR");
+    await _flutterTts.setSpeechRate(0.5);
+    await _flutterTts.setVolume(1.0);
+    await _flutterTts.setPitch(1.0);
+  }
+
+  Future<void> _playVoiceAlert() async {
+    setState(() {
+      _status = "음성 안내 송출 중...";
+    });
+    
+    await _flutterTts.speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
 
     setState(() {
       _status = "● 정상 작동 중\n캐치온 블랙박스 스트림 연결 대기\n(rtsp://192.168.1.1:554/live/ch0)";
     });
+  }
+
+  @override
+  void dispose() {
+    _flutterTts.stop();
+    super.dispose();
   }
 
   @override
@@ -103,7 +125,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                        onPressed: _triggerAudioAndStream,
+                        onPressed: _playVoiceAlert,
                         icon: const Icon(Icons.play_arrow, size: 28),
                         label: const Text(
                           "영상 및 음성 강제 실행",
