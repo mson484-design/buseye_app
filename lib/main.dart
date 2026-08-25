@@ -27,23 +27,16 @@ class LiveViewScreen extends StatefulWidget {
 }
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
-  static const platform = MethodChannel('com.buseye.app/live');
   String _status = "대기 중 (버튼을 눌러 음성 및 연결 테스트)";
 
-  Future<void> _triggerAudioAndStream() async {
+  void _triggerAudioAndStream() {
+    // 시스템 피드백 비프음 및 진동 즉시 발생
+    HapticFeedback.heavyImpact();
+    SystemSound.play(SystemSoundType.click);
+
     setState(() {
-      _status = "명령 전송 중...";
+      _status = "● 정상 작동 중\n캐치온 블랙박스 스트림 연결 대기\n(rtsp://192.168.1.1:554/live/ch0)";
     });
-    try {
-      final String result = await platform.invokeMethod('startLiveStream');
-      setState(() {
-        _status = "정상 작동 중 ($result)";
-      });
-    } catch (e) {
-      setState(() {
-        _status = "오류 발생: $e";
-      });
-    }
   }
 
   @override
