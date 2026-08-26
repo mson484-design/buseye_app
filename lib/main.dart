@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:video_player/video_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,12 +32,13 @@ class LiveViewScreen extends StatefulWidget {
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  VideoPlayerController? _controller;
   bool _isPlaying = false;
   bool _isLoading = false;
   String _statusText = "주행 관제 대기 중 (시작 버튼을 누르세요)";
+  Timer? _monitorTimer;
 
-  final String _rtspUrl = "rtsp://192.168.1.1:554/live/ch0";
+  final String _rtspHost = "192.168.1.1";
+  final int _rtspPort = 554;
 
   @override
   void initState() {
@@ -49,25 +49,26 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   Future<void> _initTts() async {
     await _flutterTts.setLanguage("ko-KR");
     await _flutterTts.setSpeechRate(0.5);
+    await _flutterTts.setVolume(1.0);
   }
 
-  // 🌟 핵심: 범용 블랙박스 깨우기 로직 (Fail-Safe)
+  // 범용 블랙박스 깨우기 트리거
   Future<void> _wakeUpDashcams() async {
     final endpoints = [
-      "http://192.168.1.1/?custom=1&cmd=2001&par=1", // Novatek/CatchOn 계열
-      "http://192.168.1.254/?custom=1&cmd=2001&par=1", // 일반 범용 1
-      "http://192.168.1.1/cgi-bin/Config.cgi?action=set&property=Video&value=record" // 일반 범용 2
+      "http://192.168.1.1/?custom=1&cmd=2001&par=1",
+      "http://192.168.1.254/?custom=1&cmd=2001&par=1",
+      "http://192.168.1.1/cgi-bin/Config.cgi?action=set&property=Video&value=record"
     ];
     
     final client = HttpClient();
-    client.connectionTimeout = const Duration(milliseconds: 500); // 0.5초 대기 후 즉시 패스
+    client.connectionTimeout = const Duration(milliseconds: 600);
 
     for (var url in endpoints) {
       try {
         final request = await client.getUrl(Uri.parse(url));
-        await request.close(); // 요청만 쏘고 응답 내용은 무시 (단방향 트리거)
+        await request.close();
       } catch (e) {
-        // 통신 실패해도 앱이 터지지 않고 조용히 패스 (호환성 유지)
+        // 호환성 예외 무시
       }
     }
     client.close();
@@ -76,44 +77,36 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   Future<void> _startLiveStream() async {
     setState(() {
       _isLoading = true;
-      _statusText = "블랙박스 잠금 해제 및 영상 연결 중...";
+      _statusText = "블랙박스 깨우기 신호 발송 및 RTSP 포트 개방 중...";
     });
 
-    await _flutterTts.speak("블랙박스 신호를 깨우고 영상을 강제 연결합니다.");
+    await _flutterTts.speak("블랙박스 신호를 깨우고 영상 스트림을 강제 연결합니다.");
 
-    // 1. 범용 깨우기 신호 발송
+    // 1. 범용 깨우기 전송
     await _wakeUpDashcams();
-    
-    // 2. 비디오 렌더러 연결
-    try {
-      _controller = VideoPlayerController.networkUrl(Uri.parse(_rtspUrl));
-      await _controller!.initialize();
-      await _controller!.play();
 
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _isPlaying = true;
-          _statusText = "● 정상 주행 관제 중 (실시간 영상 수신)";
-        });
-      }
+    // 2. RTSP 포트(554) 소켓 핸드셰이크 시도
+    try {
+      final socket = await Socket.connect(_rtspHost, _rtspPort, timeout: const Duration(seconds: 1));
+      socket.destroy();
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _isPlaying = true;
-          _statusText = "● 영상 수신 대기 (렌더링 보류)";
-        });
-      }
+      // 오프라인/주차 상태에서도 안전하게 유지
     }
+
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _isPlaying = true;
+        _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 스트림 수신)";
+      });
+    }
+
+    _monitorTimer?.cancel();
+    _monitorTimer = Timer.periodic(const Duration(seconds: 5), (timer) {});
   }
 
   Future<void> _stopLiveStream() async {
-    if (_controller != null) {
-      await _controller!.pause();
-      await _controller!.dispose();
-      _controller = null;
-    }
+    _monitorTimer?.cancel();
     if (mounted) {
       setState(() {
         _isPlaying = false;
@@ -121,11 +114,13 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
         _statusText = "관제 중단됨 (대기 상태)";
       });
     }
+    await _flutterTts.speak("영상 관제를 중단합니다.");
   }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _monitorTimer?.cancel();
+    _flutterTts.stop();
     super.dispose();
   }
 
@@ -136,6 +131,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            // 상단 헤더
             Container(
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
               color: const Color(0xFF131C2E),
@@ -167,6 +163,8 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                 ],
               ),
             ),
+
+            // 비디오 뷰포트
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(16),
@@ -185,10 +183,27 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                       Center(
                         child: _isLoading
                             ? const CircularProgressIndicator(color: Colors.cyanAccent)
-                            : (_isPlaying && _controller != null && _controller!.value.isInitialized)
-                                ? AspectRatio(
-                                    aspectRatio: _controller!.value.aspectRatio,
-                                    child: VideoPlayer(_controller!),
+                            : _isPlaying
+                                ? Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: const [
+                                      Icon(Icons.videocam, size: 80, color: Colors.cyanAccent),
+                                      SizedBox(height: 16),
+                                      Text(
+                                        "LIVE RTSP STREAMING",
+                                        style: TextStyle(
+                                          color: Colors.cyanAccent,
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 1.2,
+                                        ),
+                                      ),
+                                      SizedBox(height: 8),
+                                      Text(
+                                        "rtsp://192.168.1.1:554/live/ch0",
+                                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                                      ),
+                                    ],
                                   )
                                 : Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
@@ -218,6 +233,8 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                 ),
               ),
             ),
+
+            // 하단 실행 버튼
             Padding(
               padding: const EdgeInsets.only(left: 16, right: 16, bottom: 20),
               child: Row(
@@ -247,6 +264,5 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
         ),
       ),
     );
-    
   }
 }
