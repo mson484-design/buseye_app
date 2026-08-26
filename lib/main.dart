@@ -55,39 +55,47 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
     await _flutterTts.speak(text);
   }
 
-  void _startLiveStream() async {
+  Future<void> _startLiveStream() async {
     setState(() {
       _statusText = "블랙박스 영상 신호 수신 및 연결 중...";
     });
 
     await _speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
 
-    _controller = VideoPlayerController.networkUrl(Uri.parse(_rtspUrl))
-      ..initialize().then((_) {
+    try {
+      _controller = VideoPlayerController.networkUrl(Uri.parse(_rtspUrl));
+      await _controller!.initialize();
+      await _controller!.play();
+
+      if (mounted) {
         setState(() {
           _isPlaying = true;
           _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 영상)";
         });
-        _controller?.play();
-      }).catchError((error) {
+      }
+    } catch (e) {
+      if (mounted) {
         setState(() {
-          _isPlaying = true; // 스트림 수신 대기 상태 유지
-          _statusText = "● RTSP 스트림 연결됨 (수신 대기 중)";
+          _isPlaying = true;
+          _statusText = "● RTSP 스트림 연결 시도 중 (수신 대기)";
         });
-      });
+      }
+    }
   }
 
-  void _stopLiveStream() async {
+  Future<void> _stopLiveStream() async {
     if (_controller != null) {
       await _controller!.pause();
       await _controller!.dispose();
       _controller = null;
     }
-    setState(() {
-      _isPlaying = false;
-      _statusText = "관제 중단됨 (대기 상태)";
-    });
-    _speak("영상 관제를 일시 중단합니다.");
+    if (mounted) {
+      setState(() {
+        _isPlaying = false;
+        _statusText = "관제 중단됨 (대기 상태)";
+      });
+    }
+    await _speak("영상 관제를 일시 중단합니다.");
   }
 
   @override
@@ -154,7 +162,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                   child: Stack(
                     children: [
                       Center(
-                        child: _isPlaying && _controller != null && _controller!.value.isInitialized
+                        child: (_isPlaying && _controller != null && _controller!.value.isInitialized)
                             ? AspectRatio(
                                 aspectRatio: _controller!.value.aspectRatio,
                                 child: VideoPlayer(_controller!),
