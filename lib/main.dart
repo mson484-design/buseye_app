@@ -64,7 +64,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
 
     await _speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
 
-    // 스트림 연결 대기 루틴
     await Future.delayed(const Duration(milliseconds: 1200));
 
     if (mounted) {
@@ -75,11 +74,8 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
       });
     }
 
-    // 주행 중 상태 감시
     _monitorTimer?.cancel();
-    _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
-      // 주행 신호 유지
-    });
+    _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {});
   }
 
   Future<void> _stopLiveStream() async {
@@ -108,7 +104,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 헤더
             Container(
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
               color: const Color(0xFF131C2E),
@@ -140,8 +135,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                 ],
               ),
             ),
-
-            // 비디오 화면 뷰포트 영역
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(16),
@@ -210,8 +203,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                 ),
               ),
             ),
-
-            // 하단 조작 버튼
             Padding(
               padding: const EdgeInsets.only(left: 16, right: 16, bottom: 20),
               child: Row(
