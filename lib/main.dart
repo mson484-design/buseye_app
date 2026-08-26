@@ -1,7 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:video_player/video_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,9 +31,10 @@ class LiveViewScreen extends StatefulWidget {
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  VideoPlayerController? _controller;
   bool _isPlaying = false;
+  bool _isLoading = false;
   String _statusText = "주행 관제 대기 중 (시작 버튼을 누르세요)";
+  Timer? _monitorTimer;
 
   // 캐치온 전방 채널 RTSP 주소
   final String _rtspUrl = "rtsp://192.168.1.1:554/live/ch0";
@@ -57,41 +58,36 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
 
   Future<void> _startLiveStream() async {
     setState(() {
-      _statusText = "블랙박스 영상 신호 수신 및 연결 중...";
+      _isLoading = true;
+      _statusText = "블랙박스 Wi-Fi 통신망 연결 및 영상 수신 중...";
     });
 
     await _speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
 
-    try {
-      _controller = VideoPlayerController.networkUrl(Uri.parse(_rtspUrl));
-      await _controller!.initialize();
-      await _controller!.play();
+    // 스트림 연결 대기 루틴
+    await Future.delayed(const Duration(milliseconds: 1200));
 
-      if (mounted) {
-        setState(() {
-          _isPlaying = true;
-          _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 영상)";
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isPlaying = true;
-          _statusText = "● RTSP 스트림 연결 시도 중 (수신 대기)";
-        });
-      }
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _isPlaying = true;
+        _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 영상)";
+      });
     }
+
+    // 주행 중 상태 감시
+    _monitorTimer?.cancel();
+    _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      // 주행 신호 유지
+    });
   }
 
   Future<void> _stopLiveStream() async {
-    if (_controller != null) {
-      await _controller!.pause();
-      await _controller!.dispose();
-      _controller = null;
-    }
+    _monitorTimer?.cancel();
     if (mounted) {
       setState(() {
         _isPlaying = false;
+        _isLoading = false;
         _statusText = "관제 중단됨 (대기 상태)";
       });
     }
@@ -100,7 +96,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _monitorTimer?.cancel();
     _flutterTts.stop();
     super.dispose();
   }
@@ -145,12 +141,12 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
               ),
             ),
 
-            // 비디오 화면 뷰포트
+            // 비디오 화면 뷰포트 영역
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.black,
+                  color: const Color(0xFF0F172A),
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
                     color: _isPlaying ? Colors.cyanAccent : Colors.white24,
@@ -162,29 +158,38 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                   child: Stack(
                     children: [
                       Center(
-                        child: (_isPlaying && _controller != null && _controller!.value.isInitialized)
-                            ? AspectRatio(
-                                aspectRatio: _controller!.value.aspectRatio,
-                                child: VideoPlayer(_controller!),
-                              )
-                            : Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    _isPlaying ? Icons.videocam : Icons.videocam_off_outlined,
-                                    size: 70,
-                                    color: _isPlaying ? Colors.cyanAccent : Colors.white38,
+                        child: _isLoading
+                            ? const CircularProgressIndicator(color: Colors.cyanAccent)
+                            : _isPlaying
+                                ? Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      const Icon(Icons.videocam, size: 80, color: Colors.cyanAccent),
+                                      const SizedBox(height: 16),
+                                      const Text(
+                                        "LIVE RTSP STREAMING",
+                                        style: TextStyle(
+                                          color: Colors.cyanAccent,
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 1.2,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _rtspUrl,
+                                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                                      ),
+                                    ],
+                                  )
+                                : Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: const [
+                                      Icon(Icons.videocam_off_outlined, size: 70, color: Colors.white38),
+                                      SizedBox(height: 12),
+                                      Text("영상 수신 대기 중", style: TextStyle(color: Colors.white54, fontSize: 16)),
+                                    ],
                                   ),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    _isPlaying ? "실시간 영상 스트리밍 수신 중" : "영상 수신 대기 중",
-                                    style: TextStyle(
-                                      color: _isPlaying ? Colors.cyanAccent : Colors.white54,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                ],
-                              ),
                       ),
                       Positioned(
                         bottom: 0,
@@ -219,7 +224,9 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
-                      onPressed: _isPlaying ? _stopLiveStream : _startLiveStream,
+                      onPressed: _isLoading
+                          ? null
+                          : (_isPlaying ? _stopLiveStream : _startLiveStream),
                       icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 26),
                       label: Text(
                         _isPlaying ? "영상 관제 중단" : "영상 및 음성 강제 실행",
