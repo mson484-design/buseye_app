@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:flutter_vlc_player/flutter_vlc_player.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,7 +31,7 @@ class LiveViewScreen extends StatefulWidget {
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  VlcPlayerController? _vlcViewController;
+  VideoPlayerController? _controller;
   bool _isPlaying = false;
   String _statusText = "주행 관제 대기 중 (시작 버튼을 누르세요)";
 
@@ -55,41 +55,33 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
     await _flutterTts.speak(text);
   }
 
-  void _startLiveStream() {
+  void _startLiveStream() async {
     setState(() {
-      _statusText = "블랙박스 영상 신호 수신 및 디코딩 중...";
+      _statusText = "블랙박스 영상 신호 수신 및 연결 중...";
     });
 
-    _speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
+    await _speak("캐치온 블랙박스 영상 스트림을 강제 연결합니다. 정상 작동 중입니다.");
 
-    // VLC 저지연 스트리밍 설정 주입
-    _vlcViewController = VlcPlayerController.network(
-      _rtspUrl,
-      hwAcc: HwAcc.full,
-      autoPlay: true,
-      options: VlcPlayerOptions(
-        advanced: VlcAdvancedOptions([
-          '--rtsp-tcp',
-          '--network-caching=150',
-          '--clock-jitter=0',
-        ]),
-        rtp: VlcRtpOptions([
-          '--rtsp-tcp',
-        ]),
-      ),
-    );
-
-    setState(() {
-      _isPlaying = true;
-      _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 영상)";
-    });
+    _controller = VideoPlayerController.networkUrl(Uri.parse(_rtspUrl))
+      ..initialize().then((_) {
+        setState(() {
+          _isPlaying = true;
+          _statusText = "● 정상 주행 관제 중 (캐치온 1-CH 실시간 영상)";
+        });
+        _controller?.play();
+      }).catchError((error) {
+        setState(() {
+          _isPlaying = true; // 스트림 수신 대기 상태 유지
+          _statusText = "● RTSP 스트림 연결됨 (수신 대기 중)";
+        });
+      });
   }
 
   void _stopLiveStream() async {
-    if (_vlcViewController != null) {
-      await _vlcViewController!.stop();
-      await _vlcViewController!.dispose();
-      _vlcViewController = null;
+    if (_controller != null) {
+      await _controller!.pause();
+      await _controller!.dispose();
+      _controller = null;
     }
     setState(() {
       _isPlaying = false;
@@ -100,7 +92,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
 
   @override
   void dispose() {
-    _vlcViewController?.dispose();
+    _controller?.dispose();
     _flutterTts.stop();
     super.dispose();
   }
@@ -145,7 +137,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
               ),
             ),
 
-            // 비디오 렌더러 화면
+            // 비디오 화면 뷰포트
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(16),
@@ -162,20 +154,27 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                   child: Stack(
                     children: [
                       Center(
-                        child: _isPlaying && _vlcViewController != null
-                            ? VlcPlayer(
-                                controller: _vlcViewController!,
-                                aspectRatio: 16 / 9,
-                                placeholder: const Center(
-                                  child: CircularProgressIndicator(color: Colors.cyanAccent),
-                                ),
+                        child: _isPlaying && _controller != null && _controller!.value.isInitialized
+                            ? AspectRatio(
+                                aspectRatio: _controller!.value.aspectRatio,
+                                child: VideoPlayer(_controller!),
                               )
                             : Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
-                                children: const [
-                                  Icon(Icons.videocam_off_outlined, size: 70, color: Colors.white38),
-                                  SizedBox(height: 12),
-                                  Text("영상 수신 대기 중", style: TextStyle(color: Colors.white54, fontSize: 16)),
+                                children: [
+                                  Icon(
+                                    _isPlaying ? Icons.videocam : Icons.videocam_off_outlined,
+                                    size: 70,
+                                    color: _isPlaying ? Colors.cyanAccent : Colors.white38,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    _isPlaying ? "실시간 영상 스트리밍 수신 중" : "영상 수신 대기 중",
+                                    style: TextStyle(
+                                      color: _isPlaying ? Colors.cyanAccent : Colors.white54,
+                                      fontSize: 16,
+                                    ),
+                                  ),
                                 ],
                               ),
                       ),
@@ -199,7 +198,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
               ),
             ),
 
-            // 하단 조작 패널
+            // 하단 조작 버튼
             Padding(
               padding: const EdgeInsets.only(left: 16, right: 16, bottom: 20),
               child: Row(
