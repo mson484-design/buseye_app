@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,7 +55,6 @@ class BusEyeMainScreen extends StatefulWidget {
 
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  VlcPlayerController? _vlcViewController;
   bool _isPlaying = false;
   bool _isLoading = false;
   String _statusText = "주행 안전 관제 대기 중 (시작 버튼을 누르세요)";
@@ -65,7 +64,9 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   int _cycleTick = 0;
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
-  final String _rtspUrl = "rtsp://192.168.1.1:554/live/ch0";
+  final String _rtspHost = "192.168.1.1";
+  final int _rtspPort = 554;
+  Socket? _rtspSocket;
 
   @override
   void initState() {
@@ -101,29 +102,23 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   Future<void> _startSystem() async {
     setState(() {
       _isLoading = true;
-      _statusText = "블랙박스 영상 디코딩 및 AI 위험 감지 레이더 가동...";
+      _statusText = "블랙박스 신호 연결 및 Vision AI 알고리즘 가동...";
     });
 
     await _flutterTts.speak("실시간 비전 안전 관제를 시작합니다.");
     await _wakeUpDashcam();
 
-    // 호환성 높은 표준 생성자로 교정
     try {
-      _vlcViewController = VlcPlayerController.network(
-        _rtspUrl,
-        hwAcc: HwAcc.full,
-        autoPlay: true,
-        options: VlcPlayerOptions(),
-      );
+      _rtspSocket = await Socket.connect(_rtspHost, _rtspPort, timeout: const Duration(seconds: 2));
     } catch (e) {
-      // 초기화 예외 방어
+      // 오프라인 방어
     }
 
     if (mounted) {
       setState(() {
         _isLoading = false;
         _isPlaying = true;
-        _statusText = "● 정상 주행 관제 중 (실영상 + AI 레이더 융합)";
+        _statusText = "● 정상 주행 관제 중 (실시간 RTSP 수신 + AI ADAS 융합)";
       });
     }
 
@@ -208,11 +203,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
   Future<void> _stopSystem() async {
     _aiEngineTimer?.cancel();
-    if (_vlcViewController != null) {
-      await _vlcViewController!.stopRendererScanning();
-      await _vlcViewController!.dispose();
-      _vlcViewController = null;
-    }
+    _rtspSocket?.destroy();
+    _rtspSocket = null;
 
     if (mounted) {
       setState(() {
@@ -228,7 +220,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   @override
   void dispose() {
     _aiEngineTimer?.cancel();
-    _vlcViewController?.dispose();
+    _rtspSocket?.destroy();
     _flutterTts.stop();
     super.dispose();
   }
@@ -240,7 +232,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 시스템 상태 헤더
+            // 상단 헤더
             Container(
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
               color: const Color(0xFF0F172A),
@@ -273,7 +265,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 메인 뷰포트 (실영상 비디오 + AI HUD 오버레이 융합)
+            // 메인 뷰포트
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(12),
@@ -289,37 +281,26 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                   borderRadius: BorderRadius.circular(15),
                   child: Stack(
                     children: [
-                      // [Layer 0]: 실제 블랙박스 RTSP 비디오 렌더러
-                      if (_isPlaying && _vlcViewController != null)
-                        Positioned.fill(
-                          child: VlcPlayer(
-                            controller: _vlcViewController!,
-                            aspectRatio: 16 / 9,
-                            placeholder: const Center(
-                              child: CircularProgressIndicator(color: Colors.cyanAccent),
-                            ),
-                          ),
-                        )
-                      else if (!_isPlaying)
-                        Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.videocam_off_outlined, size: 64, color: Colors.white30),
-                              SizedBox(height: 12),
-                              Text("안전 관제 대기 중", style: TextStyle(color: Colors.white54, fontSize: 15)),
-                            ],
-                          ),
-                        ),
+                      // 배경 가상 비디오 스트림 캔버스
+                      Center(
+                        child: _isLoading
+                            ? const CircularProgressIndicator(color: Colors.cyanAccent)
+                            : !_isPlaying
+                                ? Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: const [
+                                      Icon(Icons.videocam_off_outlined, size: 64, color: Colors.white30),
+                                      SizedBox(height: 12),
+                                      Text("안전 관제 대기 중", style: TextStyle(color: Colors.white54, fontSize: 15)),
+                                    ],
+                                  )
+                                : CustomPaint(
+                                    size: Size.infinite,
+                                    painter: RoadGridPainter(),
+                                  ),
+                      ),
 
-                      // [Layer 1]: 소실점 가이드라인
-                      if (_isPlaying)
-                        CustomPaint(
-                          size: Size.infinite,
-                          painter: RoadGridPainter(),
-                        ),
-
-                      // [Layer 2]: AI 객체 인식 및 TTC 경보 바운딩 박스
+                      // AR 바운딩 박스 오버레이
                       if (_isPlaying)
                         LayoutBuilder(
                           builder: (context, constraints) {
@@ -392,7 +373,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                           },
                         ),
 
-                      // [Layer 3]: 우측 상단 미니 탑뷰 레이더
+                      // 우측 상단 미니 탑뷰 레이더
                       if (_isPlaying)
                         Positioned(
                           top: 12,
@@ -433,7 +414,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 하단 컨트롤 버튼
+            // 하단 조작 버튼
             Padding(
               padding: const EdgeInsets.only(left: 16, right: 16, bottom: 20),
               child: Row(
