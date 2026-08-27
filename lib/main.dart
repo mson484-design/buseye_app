@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -77,12 +77,12 @@ class BusEyeMainScreen extends StatefulWidget {
 
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  VlcPlayerController? _vlcViewController;
   bool _isPlaying = false;
   bool _isLoading = false;
   String _statusText = "주행 안전 관제 대기 중 (시작 버튼을 누르세요)";
 
   Timer? _aiEngineTimer;
+  Timer? _streamPollingTimer;
   List<TrackedTarget> _activeTargets = [];
   final List<SafetyEventLog> _eventLogs = [];
   
@@ -90,7 +90,14 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   double _currentSpeed = 0.0;
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
-  final String _rtspUrl = "rtsp://192.168.1.1:554/live/ch0";
+  Uint8List? _latestFrameBytes;
+  final List<String> _streamEndpoints = [
+    "http://192.168.1.1:8080/?action=snapshot",
+    "http://192.168.1.1/cgi-bin/snapshot.cgi",
+    "http://192.168.1.254/?custom=1&cmd=2003",
+    "http://192.168.1.1:8080/live/ch0.jpg"
+  ];
+  int _activeEndpointIndex = 0;
 
   @override
   void initState() {
@@ -105,16 +112,14 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   }
 
   Future<void> _wakeUpDashcam() async {
-    final endpoints = [
+    final wakeUrls = [
       "http://192.168.1.1/?custom=1&cmd=2001&par=1",
       "http://192.168.1.254/?custom=1&cmd=2001&par=1",
       "http://192.168.1.1/cgi-bin/Config.cgi?action=set&property=Video&value=record"
     ];
 
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(milliseconds: 600);
-
-    for (var url in endpoints) {
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 600);
+    for (var url in wakeUrls) {
       try {
         final request = await client.getUrl(Uri.parse(url));
         await request.close();
@@ -132,14 +137,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     await _flutterTts.speak("실시간 비전 안전 관제를 시작합니다.");
     await _wakeUpDashcam();
 
-    try {
-      _vlcViewController = VlcPlayerController.network(
-        _rtspUrl,
-        hwAcc: HwAcc.full,
-        autoPlay: true,
-        options: VlcPlayerOptions(),
-      );
-    } catch (e) {}
+    _startFrameDecoder();
 
     if (mounted) {
       setState(() {
@@ -151,6 +149,52 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     }
 
     _runAiDetectionEngine();
+  }
+
+  void _startFrameDecoder() {
+    _streamPollingTimer?.cancel();
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 400);
+
+    // 고속 15fps 비디오 프레임 폴링 스트리머
+    _streamPollingTimer = Timer.periodic(const Duration(milliseconds: 66), (timer) async {
+      if (!_isPlaying) return;
+      try {
+        final url = _streamEndpoints[_activeEndpointIndex];
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close();
+        if (response.statusCode == 200) {
+          final bytes = await consolidateHttpClientResponseBytes(response);
+          if (mounted && bytes.isNotEmpty) {
+            setState(() {
+              _latestFrameBytes = bytes;
+            });
+          }
+        } else {
+          _activeEndpointIndex = (_activeEndpointIndex + 1) % _streamEndpoints.length;
+        }
+      } catch (e) {
+        _activeEndpointIndex = (_activeEndpointIndex + 1) % _streamEndpoints.length;
+      }
+    });
+  }
+
+  Future<Uint8List> consolidateHttpClientResponseBytes(HttpClientResponse response) {
+    final completer = Completer<Uint8List>();
+    final chunks = <List<int>>[];
+    int totalLength = 0;
+    response.listen((List<int> chunk) {
+      chunks.add(chunk);
+      totalLength += chunk.length;
+    }, onDone: () {
+      final bytes = Uint8List(totalLength);
+      int offset = 0;
+      for (final chunk in chunks) {
+        bytes.setRange(offset, offset + chunk.length, chunk);
+        offset += chunk.length;
+      }
+      completer.complete(bytes);
+    }, onError: completer.completeError, cancelOnError: true);
+    return completer.future;
   }
 
   void _runAiDetectionEngine() {
@@ -251,17 +295,14 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
   Future<void> _stopSystem() async {
     _aiEngineTimer?.cancel();
-    if (_vlcViewController != null) {
-      await _vlcViewController!.stopRendererScanning();
-      await _vlcViewController!.dispose();
-      _vlcViewController = null;
-    }
+    _streamPollingTimer?.cancel();
 
     if (mounted) {
       setState(() {
         _isPlaying = false;
         _isLoading = false;
         _currentSpeed = 0.0;
+        _latestFrameBytes = null;
         _activeTargets = [];
         _statusText = "관제 중단됨 (대기 상태)";
       });
@@ -359,7 +400,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   @override
   void dispose() {
     _aiEngineTimer?.cancel();
-    _vlcViewController?.dispose();
+    _streamPollingTimer?.cancel();
     _flutterTts.stop();
     super.dispose();
   }
@@ -373,7 +414,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 바 (속도계 HUD + 이벤트 로그 아이콘)
+            // 상단 헤더
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               color: const Color(0xFF0F172A),
@@ -419,7 +460,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 메인 뷰포트 (실제 비디오 스트림 + AI HUD 합성 레이어)
+            // 메인 뷰포트
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(8),
@@ -436,16 +477,19 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      // [핵심]: 실제 블랙박스 H.264 라이브 비디오 스트림 화면
-                      if (_isPlaying && _vlcViewController != null)
-                        VlcPlayer(
-                          controller: _vlcViewController!,
-                          aspectRatio: 16 / 9,
-                          placeholder: const Center(
-                            child: CircularProgressIndicator(color: Colors.cyanAccent),
-                          ),
+                      // [실제 블랙박스 비디오 스트림 디코더 레이어]
+                      if (_isPlaying && _latestFrameBytes != null)
+                        Image.memory(
+                          _latestFrameBytes!,
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
                         )
-                      else if (!_isPlaying)
+                      else if (_isPlaying && _latestFrameBytes == null)
+                        CustomPaint(
+                          size: Size.infinite,
+                          painter: RoadGridPainter(),
+                        )
+                      else
                         Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -602,6 +646,25 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       ),
     );
   }
+}
+
+class RoadGridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.cyanAccent.withOpacity(0.2)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final vp = Offset(size.width * 0.5, size.height * 0.42);
+    canvas.drawLine(vp, Offset(size.width * 0.05, size.height), paint);
+    canvas.drawLine(vp, Offset(size.width * 0.95, size.height), paint);
+    canvas.drawLine(vp, Offset(size.width * 0.35, size.height), paint..color = Colors.white12);
+    canvas.drawLine(vp, Offset(size.width * 0.65, size.height), paint..color = Colors.white12);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class MiniRadarPainter extends CustomPainter {
