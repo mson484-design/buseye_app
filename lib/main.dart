@@ -40,14 +40,15 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts _flutterTts = FlutterTts();
   bool _isPlaying = false;
   bool _isLoading = false;
-  String _statusText = "대기 중: 블랙박스 Wi-Fi 연결 후 관제를 시작하세요.";
-  String _activeProtocol = "연결 안 됨";
+  String _statusText = "Wi-Fi 서칭 완료: 관제 시작 버튼을 누르세요.";
+  String _activeProtocol = "탐색 대기";
+  String _networkStatusText = "Wi-Fi 네트워크 스캔 중...";
   int _receivedFrameCount = 0;
 
   Timer? _scannerTimer;
+  Timer? _wifiScanTimer;
   Uint8List? _latestFrameBytes;
 
-  // 시중 범용 블랙박스 및 IP 카메라 실시간 스냅샷/스트림 엔드포인트
   final List<Map<String, String>> _streamCandidates = [
     {"name": "Novatek RTSP/HTTP (8080)", "url": "http://192.168.1.1:8080/?action=snapshot"},
     {"name": "Novatek Live JPG", "url": "http://192.168.1.1:8080/live/ch0.jpg"},
@@ -63,12 +64,49 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   void initState() {
     super.initState();
     _initTts();
+    _startWifiNetworkSurfing();
   }
 
   Future<void> _initTts() async {
     await _flutterTts.setLanguage("ko-KR");
     await _flutterTts.setSpeechRate(0.5);
     await _flutterTts.setVolume(1.0);
+  }
+
+  // 실시간 Wi-Fi 네트워크 환경 및 게이트웨이 서칭
+  void _startWifiNetworkSurfing() {
+    _wifiScanTimer?.cancel();
+    _wifiScanTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      try {
+        // 네트워크 인터페이스를 통한 주변 IP 바인딩 검사
+        final interfaces = await NetworkInterface.list(includeLoopback: false, type: InternetAddressType.IPv4);
+        if (interfaces.isNotEmpty) {
+          for (var interface in interfaces) {
+            for (var addr in interface.addresses) {
+              if (addr.address.startsWith("192.168.")) {
+                if (mounted) {
+                  setState(() {
+                    _networkStatusText = "Wi-Fi 연결됨 (${interface.name}) | IP: ${addr.address}";
+                  });
+                }
+                return;
+              }
+            }
+          }
+        }
+        if (mounted) {
+          setState(() {
+            _networkStatusText = "⚠️ 블랙박스 Wi-Fi 미접속 상태 (휴대폰 설정 확인 필요)";
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _networkStatusText = "Wi-Fi 서칭 오류 발생";
+          });
+        }
+      }
+    });
   }
 
   Future<void> _sendUniversalWakeUp() async {
@@ -189,6 +227,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   @override
   void dispose() {
     _scannerTimer?.cancel();
+    _wifiScanTimer?.cancel();
     _flutterTts.stop();
     super.dispose();
   }
@@ -200,59 +239,56 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 하드웨어 연결 상태 헤더
+            // 상단 하드웨어 및 Wi-Fi 서칭 상태 헤더
             Container(
               padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
               color: const Color(0xFF0F172A),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    Icons.wifi_tethering,
-                    color: _latestFrameBytes != null ? Colors.greenAccent : Colors.amberAccent,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.wifi_tethering,
+                        color: _latestFrameBytes != null ? Colors.greenAccent : Colors.amberAccent,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
                           "BusEye Real-Hardware Validator",
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
                         ),
-                        Text(
-                          "프로토콜: $_activeProtocol",
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: _latestFrameBytes != null ? Colors.greenAccent : Colors.white60,
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _latestFrameBytes != null ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _latestFrameBytes != null ? Colors.greenAccent : Colors.redAccent,
                           ),
-                          overflow: TextOverflow.ellipsis,
                         ),
-                      ],
-                    ),
+                        child: Text(
+                          _latestFrameBytes != null ? "STREAM LIVE" : "NO SIGNAL",
+                          style: TextStyle(
+                            color: _latestFrameBytes != null ? Colors.greenAccent : Colors.redAccent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _latestFrameBytes != null ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: _latestFrameBytes != null ? Colors.greenAccent : Colors.redAccent,
-                      ),
-                    ),
-                    child: Text(
-                      _latestFrameBytes != null ? "STREAM LIVE" : "NO SIGNAL",
-                      style: TextStyle(
-                        color: _latestFrameBytes != null ? Colors.greenAccent : Colors.redAccent,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _networkStatusText,
+                    style: const TextStyle(fontSize: 11, color: Colors.cyanAccent),
                   ),
                 ],
               ),
             ),
 
-            // 메인 뷰포트 (오직 실제 영상만 렌더링)
+            // 메인 뷰포트
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(8),
@@ -269,7 +305,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      // [실제 블랙박스 수신 프레임 렌더러]
                       if (_isPlaying && _latestFrameBytes != null)
                         Image.memory(
                           _latestFrameBytes!,
@@ -302,7 +337,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                             children: const [
                               Icon(Icons.videocam_off_outlined, size: 56, color: Colors.white30),
                               SizedBox(height: 12),
-                              Text("블랙박스 Wi-Fi 연결 후 아래 버튼을 누르세요", style: TextStyle(color: Colors.white54, fontSize: 14)),
+                              Text("블랙박스 Wi-Fi 연결 상태를 확인 후 시작하세요", style: TextStyle(color: Colors.white54, fontSize: 14)),
                             ],
                           ),
                         ),
