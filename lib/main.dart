@@ -4,10 +4,10 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // 가로/세로 모든 방향 자유 회전 허용
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -77,6 +77,7 @@ class BusEyeMainScreen extends StatefulWidget {
 
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   final FlutterTts _flutterTts = FlutterTts();
+  VlcPlayerController? _vlcViewController;
   bool _isPlaying = false;
   bool _isLoading = false;
   String _statusText = "주행 안전 관제 대기 중 (시작 버튼을 누르세요)";
@@ -89,9 +90,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   double _currentSpeed = 0.0;
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
-  final String _rtspHost = "192.168.1.1";
-  final int _rtspPort = 554;
-  Socket? _rtspSocket;
+  final String _rtspUrl = "rtsp://192.168.1.1:554/live/ch0";
 
   @override
   void initState() {
@@ -127,14 +126,19 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   Future<void> _startSystem() async {
     setState(() {
       _isLoading = true;
-      _statusText = "블랙박스 신호 연결 및 Vision AI 알고리즘 가동...";
+      _statusText = "블랙박스 실시간 비디오 스트림 디코딩 연결 중...";
     });
 
     await _flutterTts.speak("실시간 비전 안전 관제를 시작합니다.");
     await _wakeUpDashcam();
 
     try {
-      _rtspSocket = await Socket.connect(_rtspHost, _rtspPort, timeout: const Duration(seconds: 2));
+      _vlcViewController = VlcPlayerController.network(
+        _rtspUrl,
+        hwAcc: HwAcc.full,
+        autoPlay: true,
+        options: VlcPlayerOptions(),
+      );
     } catch (e) {}
 
     if (mounted) {
@@ -142,7 +146,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
         _isLoading = false;
         _isPlaying = true;
         _currentSpeed = 42.0;
-        _statusText = "● 정상 주행 관제 중 (실시간 RTSP 수신 + AI ADAS 융합)";
+        _statusText = "● 실차 라이브 비디오 수신 중 (실시간 ADAS 가동)";
       });
     }
 
@@ -184,7 +188,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
           threatLevel: ThreatLevel.warning,
         ));
 
-        // 위험 이벤트 블랙박스 자동 기록
         _logSafetyEvent("전방 추돌 위험", dist, ttc, speed);
         _triggerVoiceAlert("전방 추돌 주의! 안전거리를 확보하세요.");
       } else {
@@ -248,8 +251,11 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
   Future<void> _stopSystem() async {
     _aiEngineTimer?.cancel();
-    _rtspSocket?.destroy();
-    _rtspSocket = null;
+    if (_vlcViewController != null) {
+      await _vlcViewController!.stopRendererScanning();
+      await _vlcViewController!.dispose();
+      _vlcViewController = null;
+    }
 
     if (mounted) {
       setState(() {
@@ -353,7 +359,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
   @override
   void dispose() {
     _aiEngineTimer?.cancel();
-    _rtspSocket?.destroy();
+    _vlcViewController?.dispose();
     _flutterTts.stop();
     super.dispose();
   }
@@ -367,7 +373,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 시스템 상태 & 디지털 속도계 헤더
+            // 상단 바 (속도계 HUD + 이벤트 로그 아이콘)
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               color: const Color(0xFF0F172A),
@@ -380,7 +386,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
                   const Spacer(),
-                  // 디지털 속도계 HUD
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
@@ -405,7 +410,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // 이벤트 로그 버튼
                   IconButton(
                     icon: const Icon(Icons.history, color: Colors.amberAccent, size: 22),
                     tooltip: "이벤트 기록",
@@ -415,7 +419,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 메인 뷰포트
+            // 메인 뷰포트 (실제 비디오 스트림 + AI HUD 합성 레이어)
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(8),
@@ -430,25 +434,28 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(15),
                   child: Stack(
+                    fit: StackFit.expand,
                     children: [
-                      // 배경 가상 도로 그리드
-                      Center(
-                        child: _isLoading
-                            ? const CircularProgressIndicator(color: Colors.cyanAccent)
-                            : !_isPlaying
-                                ? Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: const [
-                                      Icon(Icons.videocam_off_outlined, size: 64, color: Colors.white30),
-                                      SizedBox(height: 12),
-                                      Text("안전 관제 대기 중", style: TextStyle(color: Colors.white54, fontSize: 15)),
-                                    ],
-                                  )
-                                : CustomPaint(
-                                    size: Size.infinite,
-                                    painter: RoadGridPainter(),
-                                  ),
-                      ),
+                      // [핵심]: 실제 블랙박스 H.264 라이브 비디오 스트림 화면
+                      if (_isPlaying && _vlcViewController != null)
+                        VlcPlayer(
+                          controller: _vlcViewController!,
+                          aspectRatio: 16 / 9,
+                          placeholder: const Center(
+                            child: CircularProgressIndicator(color: Colors.cyanAccent),
+                          ),
+                        )
+                      else if (!_isPlaying)
+                        Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: const [
+                              Icon(Icons.videocam_off_outlined, size: 64, color: Colors.white30),
+                              SizedBox(height: 12),
+                              Text("안전 관제 대기 중 (차량 블랙박스 연동)", style: TextStyle(color: Colors.white54, fontSize: 15)),
+                            ],
+                          ),
+                        ),
 
                       // AR 바운딩 박스 오버레이
                       if (_isPlaying)
@@ -564,7 +571,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 하단 조작 컨트롤러
+            // 하단 컨트롤러
             Padding(
               padding: const EdgeInsets.only(left: 12, right: 12, bottom: 12),
               child: Row(
@@ -595,25 +602,6 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       ),
     );
   }
-}
-
-class RoadGridPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.cyanAccent.withOpacity(0.2)
-      ..strokeWidth = 1.0
-      ..style = PaintingStyle.stroke;
-
-    final vp = Offset(size.width * 0.5, size.height * 0.42);
-    canvas.drawLine(vp, Offset(size.width * 0.05, size.height), paint);
-    canvas.drawLine(vp, Offset(size.width * 0.95, size.height), paint);
-    canvas.drawLine(vp, Offset(size.width * 0.35, size.height), paint..color = Colors.white12);
-    canvas.drawLine(vp, Offset(size.width * 0.65, size.height), paint..color = Colors.white12);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class MiniRadarPainter extends CustomPainter {
