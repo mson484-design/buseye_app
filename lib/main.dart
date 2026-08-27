@@ -107,23 +107,16 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
     await _flutterTts.speak("실시간 비전 안전 관제를 시작합니다.");
     await _wakeUpDashcam();
 
-    // RTSP 비디오 컨트롤러 초기화
+    // 호환성 높은 표준 생성자로 교정
     try {
       _vlcViewController = VlcPlayerController.network(
         _rtspUrl,
         hwAcc: HwAcc.full,
         autoPlay: true,
-        options: VlcPlayerOptions(
-          advanced: VlcAdvancedOptions([
-            VlcAdvancedOptions.networkCaching(300), // 저지연 300ms 캐싱
-          ]),
-          rtp: VlcRtpOptions([
-            VlcRtpOptions.rtpOverRtsp(true),
-          ]),
-        ),
+        options: VlcPlayerOptions(),
       );
     } catch (e) {
-      // 영상 초기화 예외 방어
+      // 초기화 예외 방어
     }
 
     if (mounted) {
