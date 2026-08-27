@@ -7,7 +7,13 @@ import 'package:flutter_tts/flutter_tts.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  // 가로/세로 모든 방향 자유 회전 허용
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
   runApp(const BusEyeApp());
 }
 
@@ -25,6 +31,22 @@ class BusEyeApp extends StatelessWidget {
 }
 
 enum ThreatLevel { safe, caution, warning }
+
+class SafetyEventLog {
+  final DateTime timestamp;
+  final String eventType;
+  final double distance;
+  final double ttc;
+  final double speed;
+
+  SafetyEventLog({
+    required this.timestamp,
+    required this.eventType,
+    required this.distance,
+    required this.ttc,
+    required this.speed,
+  });
+}
 
 class TrackedTarget {
   final String id;
@@ -61,7 +83,10 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
   Timer? _aiEngineTimer;
   List<TrackedTarget> _activeTargets = [];
+  final List<SafetyEventLog> _eventLogs = [];
+  
   int _cycleTick = 0;
+  double _currentSpeed = 0.0;
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
   final String _rtspHost = "192.168.1.1";
@@ -110,14 +135,13 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
     try {
       _rtspSocket = await Socket.connect(_rtspHost, _rtspPort, timeout: const Duration(seconds: 2));
-    } catch (e) {
-      // 오프라인 방어
-    }
+    } catch (e) {}
 
     if (mounted) {
       setState(() {
         _isLoading = false;
         _isPlaying = true;
+        _currentSpeed = 42.0;
         _statusText = "● 정상 주행 관제 중 (실시간 RTSP 수신 + AI ADAS 융합)";
       });
     }
@@ -135,6 +159,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
       final mod = _cycleTick % 10;
       List<TrackedTarget> targets = [];
+      double speed = 40.0 + (sin(_cycleTick * 0.5) * 6.0);
 
       if (mod >= 0 && mod <= 3) {
         targets.add(TrackedTarget(
@@ -159,7 +184,9 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
           threatLevel: ThreatLevel.warning,
         ));
 
-        _triggerVoiceAlert("전방 추돌 주의! 안전거리를 확보하세요.", ThreatLevel.warning);
+        // 위험 이벤트 블랙박스 자동 기록
+        _logSafetyEvent("전방 추돌 위험", dist, ttc, speed);
+        _triggerVoiceAlert("전방 추돌 주의! 안전거리를 확보하세요.");
       } else {
         targets.add(TrackedTarget(
           id: "CAR_01",
@@ -181,19 +208,37 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
         ));
 
         if (mod == 7) {
-          _triggerVoiceAlert("우측 전방 보행자 주의 구간입니다.", ThreatLevel.caution);
+          _logSafetyEvent("보행자 접근 주의", 8.5, 3.5, speed);
+          _triggerVoiceAlert("우측 전방 보행자 주의 구간입니다.");
         }
       }
 
       if (mounted) {
         setState(() {
           _activeTargets = targets;
+          _currentSpeed = speed;
         });
       }
     });
   }
 
-  Future<void> _triggerVoiceAlert(String message, ThreatLevel level) async {
+  void _logSafetyEvent(String type, double dist, double ttc, double speed) {
+    if (_eventLogs.isEmpty || DateTime.now().difference(_eventLogs.first.timestamp).inSeconds >= 2) {
+      _eventLogs.insert(
+        0,
+        SafetyEventLog(
+          timestamp: DateTime.now(),
+          eventType: type,
+          distance: dist,
+          ttc: ttc,
+          speed: speed,
+        ),
+      );
+      if (_eventLogs.length > 50) _eventLogs.removeLast();
+    }
+  }
+
+  Future<void> _triggerVoiceAlert(String message) async {
     final now = DateTime.now();
     if (now.difference(_lastAlertTime).inSeconds >= 4) {
       _lastAlertTime = now;
@@ -210,11 +255,99 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
       setState(() {
         _isPlaying = false;
         _isLoading = false;
+        _currentSpeed = 0.0;
         _activeTargets = [];
         _statusText = "관제 중단됨 (대기 상태)";
       });
     }
     await _flutterTts.speak("안전 관제를 중단합니다.");
+  }
+
+  void _showEventLogsModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0F172A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    "위험 감지 이벤트 블랙박스 로그",
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.cyanAccent),
+                  ),
+                  Text(
+                    "총 ${_eventLogs.length}건",
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
+              const Divider(color: Colors.white24, height: 20),
+              Expanded(
+                child: _eventLogs.isEmpty
+                    ? const Center(
+                        child: Text("기록된 위험 이벤트가 없습니다.", style: TextStyle(color: Colors.white38)),
+                      )
+                    : ListView.builder(
+                        itemCount: _eventLogs.length,
+                        itemBuilder: (context, index) {
+                          final log = _eventLogs[index];
+                          final timeStr = "${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}";
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1E293B),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.redAccent.withOpacity(0.4)),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      "[$timeStr] ${log.eventType}",
+                                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      "거리: ${log.distance.toStringAsFixed(1)}m | 속도: ${log.speed.toStringAsFixed(0)}km/h",
+                                      style: const TextStyle(color: Colors.white60, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.redAccent.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: Colors.redAccent),
+                                  ),
+                                  child: Text(
+                                    "TTC ${log.ttc.toStringAsFixed(1)}s",
+                                    style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -227,14 +360,16 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+
     return Scaffold(
       backgroundColor: const Color(0xFF070B12),
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 헤더
+            // 상단 시스템 상태 & 디지털 속도계 헤더
             Container(
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               color: const Color(0xFF0F172A),
               child: Row(
                 children: [
@@ -242,24 +377,39 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                   const SizedBox(width: 8),
                   const Text(
                     "BusEye Vision AI Engine",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
                   const Spacer(),
+                  // 디지털 속도계 HUD
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      color: _isPlaying ? Colors.green.withOpacity(0.2) : Colors.amber.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: _isPlaying ? Colors.greenAccent : Colors.amberAccent),
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.cyanAccent.withOpacity(0.5)),
                     ),
-                    child: Text(
-                      _isPlaying ? "AI ADAS ACTIVE" : "STANDBY",
-                      style: TextStyle(
-                        color: _isPlaying ? Colors.greenAccent : Colors.amberAccent,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
+                    child: Row(
+                      children: [
+                        Text(
+                          "${_currentSpeed.toStringAsFixed(0)}",
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.cyanAccent,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Text("km/h", style: TextStyle(fontSize: 11, color: Colors.white70)),
+                      ],
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  // 이벤트 로그 버튼
+                  IconButton(
+                    icon: const Icon(Icons.history, color: Colors.amberAccent, size: 22),
+                    tooltip: "이벤트 기록",
+                    onPressed: _showEventLogsModal,
                   ),
                 ],
               ),
@@ -268,7 +418,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
             // 메인 뷰포트
             Expanded(
               child: Container(
-                margin: const EdgeInsets.all(12),
+                margin: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   color: const Color(0xFF0B132B),
                   borderRadius: BorderRadius.circular(16),
@@ -281,7 +431,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                   borderRadius: BorderRadius.circular(15),
                   child: Stack(
                     children: [
-                      // 배경 가상 비디오 스트림 캔버스
+                      // 배경 가상 도로 그리드
                       Center(
                         child: _isLoading
                             ? const CircularProgressIndicator(color: Colors.cyanAccent)
@@ -376,11 +526,11 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                       // 우측 상단 미니 탑뷰 레이더
                       if (_isPlaying)
                         Positioned(
-                          top: 12,
-                          right: 12,
+                          top: 10,
+                          right: 10,
                           child: Container(
-                            width: 100,
-                            height: 110,
+                            width: isLandscape ? 120 : 95,
+                            height: isLandscape ? 110 : 100,
                             padding: const EdgeInsets.all(6),
                             decoration: BoxDecoration(
                               color: Colors.black.withOpacity(0.7),
@@ -399,7 +549,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                         left: 0,
                         right: 0,
                         child: Container(
-                          padding: const EdgeInsets.all(10),
+                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
                           color: Colors.black.withOpacity(0.8),
                           child: Text(
                             _statusText,
@@ -414,9 +564,9 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
               ),
             ),
 
-            // 하단 조작 버튼
+            // 하단 조작 컨트롤러
             Padding(
-              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 20),
+              padding: const EdgeInsets.only(left: 12, right: 12, bottom: 12),
               child: Row(
                 children: [
                   Expanded(
@@ -424,16 +574,16 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> {
                       style: ElevatedButton.styleFrom(
                         backgroundColor: _isPlaying ? Colors.redAccent : Colors.cyanAccent,
                         foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
                       onPressed: _isLoading
                           ? null
                           : (_isPlaying ? _stopSystem : _startSystem),
-                      icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 26),
+                      icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 24),
                       label: Text(
                         _isPlaying ? "관제 중단" : "실시간 비전 관제 가동",
-                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ),
