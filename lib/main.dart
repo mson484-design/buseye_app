@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
-List<CameraDescription> cameras = [];
+List<CameraDescription> _cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,16 +17,16 @@ Future<void> main() async {
   ]);
 
   try {
-    cameras = await availableCameras();
+    _cameras = await availableCameras();
   } catch (e) {
-    debugPrint('Camera Init Error: $e');
+    debugPrint('카메라 초기화 예외: $e');
   }
 
-  runApp(const BusEyeApp());
+  runApp(const BusEyeSafetyApp());
 }
 
-class BusEyeApp extends StatelessWidget {
-  const BusEyeApp({super.key});
+class BusEyeSafetyApp extends StatelessWidget {
+  const BusEyeSafetyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -84,17 +84,17 @@ class BusEyeMainScreen extends StatefulWidget {
 }
 
 class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBindingObserver {
-  final FlutterTts _flutterTts = FlutterTts();
-  CameraController? _controller;
+  final FlutterTts _tts = FlutterTts();
+  CameraController? _cameraController;
   bool _isCameraReady = false;
   bool _isPlaying = false;
-  String _statusText = "스마트폰 전방 거치 후 비전 관제를 가동하세요.";
+  String _statusText = "스마트폰을 차량 전방에 거치 후 관제를 시작하세요.";
 
-  Timer? _aiEngineTimer;
+  Timer? _engineTimer;
   List<TrackedTarget> _activeTargets = [];
-  final List<SafetyEventLog> _eventLogs = [];
+  final List<SafetyEventLog> _logs = [];
 
-  int _cycleTick = 0;
+  int _tick = 0;
   double _currentSpeed = 0.0;
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
@@ -107,44 +107,44 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
   }
 
   Future<void> _initTts() async {
-    await _flutterTts.setLanguage("ko-KR");
-    await _flutterTts.setSpeechRate(0.5);
-    await _flutterTts.setVolume(1.0);
+    await _tts.setLanguage("ko-KR");
+    await _tts.setSpeechRate(0.5);
+    await _tts.setVolume(1.0);
   }
 
   Future<void> _initCamera() async {
-    if (cameras.isEmpty) {
+    if (_cameras.isEmpty) {
       if (mounted) {
         setState(() {
-          _statusText = "사용 가능한 카메라를 찾을 수 없습니다.";
+          _statusText = "사용 가능한 후면 카메라를 찾을 수 없습니다.";
         });
       }
       return;
     }
 
-    CameraDescription selectedCam = cameras.firstWhere(
+    CameraDescription backCamera = _cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.back,
-      orElse: () => cameras.first,
+      orElse: () => _cameras.first,
     );
 
-    _controller = CameraController(
-      selectedCam,
+    _cameraController = CameraController(
+      backCamera,
       ResolutionPreset.high,
       enableAudio: false,
     );
 
     try {
-      await _controller!.initialize();
+      await _cameraController!.initialize();
       if (mounted) {
         setState(() {
           _isCameraReady = true;
-          _statusText = "전방 카메라 수신 준비 완료";
+          _statusText = "전방 카메라 수신 준비 완료 (가동 버튼을 누르세요)";
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _statusText = "카메라 초기화 실패: 권한을 허용해 주세요.";
+          _statusText = "카메라 권한을 확인해 주세요.";
         });
       }
     }
@@ -152,37 +152,37 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
     if (state == AppLifecycleState.inactive) {
-      _controller?.dispose();
+      _cameraController?.dispose();
     } else if (state == AppLifecycleState.resumed) {
       _initCamera();
     }
   }
 
   Future<void> _startSystem() async {
-    await _flutterTts.speak("실시간 비전 안전 관제를 시작합니다.");
+    await _tts.speak("실시간 비전 안전 관제를 시작합니다.");
     if (mounted) {
       setState(() {
         _isPlaying = true;
         _currentSpeed = 42.0;
-        _statusText = "● 실시간 도로 영상 분석 및 AI 관제 가동 중";
+        _statusText = "● 도로 영상 분석 및 AI 충돌 방지 가동 중";
       });
     }
-    _runAiEngine();
+    _startAiLoop();
   }
 
-  void _runAiEngine() {
-    _aiEngineTimer?.cancel();
-    _cycleTick = 0;
+  void _startAiLoop() {
+    _engineTimer?.cancel();
+    _tick = 0;
 
-    _aiEngineTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
+    _engineTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
       if (!_isPlaying) return;
-      _cycleTick++;
+      _tick++;
 
-      final mod = _cycleTick % 10;
+      final mod = _tick % 10;
       List<TrackedTarget> targets = [];
-      double speed = 40.0 + (sin(_cycleTick * 0.5) * 6.0);
+      double speed = 40.0 + (sin(_tick * 0.5) * 6.0);
 
       if (mod >= 0 && mod <= 3) {
         targets.add(TrackedTarget(
@@ -207,8 +207,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
           threatLevel: ThreatLevel.warning,
         ));
 
-        _logSafetyEvent("전방 추돌 위험", dist, ttc, speed);
-        _triggerVoiceAlert("전방 추돌 주의! 안전거리를 확보하세요.");
+        _logEvent("전방 추돌 위험", dist, ttc, speed);
+        _speakAlert("전방 추돌 주의! 안전거리를 확보하세요.");
       } else {
         targets.add(TrackedTarget(
           id: "CAR_01",
@@ -230,8 +230,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
         ));
 
         if (mod == 7) {
-          _logSafetyEvent("보행자 접근 주의", 8.5, 3.5, speed);
-          _triggerVoiceAlert("우측 전방 보행자 주의 구간입니다.");
+          _logEvent("보행자 접근 주의", 8.5, 3.5, speed);
+          _speakAlert("우측 전방 보행자 주의 구간입니다.");
         }
       }
 
@@ -244,9 +244,9 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
     });
   }
 
-  void _logSafetyEvent(String type, double dist, double ttc, double speed) {
-    if (_eventLogs.isEmpty || DateTime.now().difference(_eventLogs.first.timestamp).inSeconds >= 2) {
-      _eventLogs.insert(
+  void _logEvent(String type, double dist, double ttc, double speed) {
+    if (_logs.isEmpty || DateTime.now().difference(_logs.first.timestamp).inSeconds >= 2) {
+      _logs.insert(
         0,
         SafetyEventLog(
           timestamp: DateTime.now(),
@@ -256,20 +256,20 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
           speed: speed,
         ),
       );
-      if (_eventLogs.length > 50) _eventLogs.removeLast();
+      if (_logs.length > 50) _logs.removeLast();
     }
   }
 
-  Future<void> _triggerVoiceAlert(String message) async {
+  Future<void> _speakAlert(String message) async {
     final now = DateTime.now();
     if (now.difference(_lastAlertTime).inSeconds >= 4) {
       _lastAlertTime = now;
-      await _flutterTts.speak(message);
+      await _tts.speak(message);
     }
   }
 
   Future<void> _stopSystem() async {
-    _aiEngineTimer?.cancel();
+    _engineTimer?.cancel();
     if (mounted) {
       setState(() {
         _isPlaying = false;
@@ -278,10 +278,10 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
         _statusText = "관제 중단됨 (대기 상태)";
       });
     }
-    await _flutterTts.speak("안전 관제를 중단합니다.");
+    await _tts.speak("안전 관제를 중단합니다.");
   }
 
-  void _showEventLogsModal() {
+  void _showLogsModal() {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF0F172A),
@@ -298,20 +298,20 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text(
-                    "위험 감지 이벤트 로그",
+                    "위험 감지 이벤트 블랙박스 로그",
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.cyanAccent),
                   ),
-                  Text("총 ${_eventLogs.length}건", style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                  Text("총 ${_logs.length}건", style: const TextStyle(color: Colors.white70, fontSize: 13)),
                 ],
               ),
               const Divider(color: Colors.white24, height: 20),
               Expanded(
-                child: _eventLogs.isEmpty
+                child: _logs.isEmpty
                     ? const Center(child: Text("기록된 위험 이벤트가 없습니다.", style: TextStyle(color: Colors.white38)))
                     : ListView.builder(
-                        itemCount: _eventLogs.length,
+                        itemCount: _logs.length,
                         itemBuilder: (context, index) {
-                          final log = _eventLogs[index];
+                          final log = _logs[index];
                           final timeStr = "${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}";
                           return Container(
                             margin: const EdgeInsets.only(bottom: 8),
@@ -357,9 +357,9 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _aiEngineTimer?.cancel();
-    _controller?.dispose();
-    _flutterTts.stop();
+    _engineTimer?.cancel();
+    _cameraController?.dispose();
+    _tts.stop();
     super.dispose();
   }
 
@@ -400,7 +400,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                   IconButton(
                     icon: const Icon(Icons.history, color: Colors.amberAccent, size: 22),
                     tooltip: "이벤트 기록",
-                    onPressed: _showEventLogsModal,
+                    onPressed: _showLogsModal,
                   ),
                 ],
               ),
@@ -418,8 +418,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      if (_isCameraReady && _controller != null)
-                        CameraPreview(_controller!)
+                      if (_isCameraReady && _cameraController != null)
+                        CameraPreview(_cameraController!)
                       else
                         const Center(child: CircularProgressIndicator(color: Colors.cyanAccent)),
 
