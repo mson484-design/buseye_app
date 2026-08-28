@@ -1,101 +1,85 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
-List<CameraDescription> _cameras = [];
+List<CameraDescription> _availableCameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
   ]);
 
   try {
-    _cameras = await availableCameras();
+    _availableCameras = await availableCameras();
   } catch (e) {
-    debugPrint('카메라 초기화 예외: $e');
+    debugPrint('카메라 초기화 오류: $e');
   }
 
-  runApp(const BusEyeSafetyApp());
+  runApp(const BusEyeRealVisionApp());
 }
 
-class BusEyeSafetyApp extends StatelessWidget {
-  const BusEyeSafetyApp({super.key});
+class BusEyeRealVisionApp extends StatelessWidget {
+  const BusEyeRealVisionApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'BusEye Real Vision',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      home: const BusEyeMainScreen(),
+      home: const BusEyeRealVisionScreen(),
     );
   }
 }
 
 enum ThreatLevel { safe, caution, warning }
 
-class SafetyEventLog {
-  final DateTime timestamp;
-  final String eventType;
-  final double distance;
+class RealDetectedTarget {
+  final Rect screenRect;
+  final double estimatedDistance;
   final double ttc;
-  final double speed;
-
-  SafetyEventLog({
-    required this.timestamp,
-    required this.eventType,
-    required this.distance,
-    required this.ttc,
-    required this.speed,
-  });
-}
-
-class TrackedTarget {
-  final String id;
+  final ThreatLevel threat;
   final String label;
-  Rect screenRect;
-  double distance;
-  double relativeSpeed;
-  double ttc;
-  ThreatLevel threatLevel;
 
-  TrackedTarget({
-    required this.id,
-    required this.label,
+  RealDetectedTarget({
     required this.screenRect,
-    required this.distance,
-    required this.relativeSpeed,
+    required this.estimatedDistance,
     required this.ttc,
-    required this.threatLevel,
+    required this.threat,
+    required this.label,
   });
 }
 
-class BusEyeMainScreen extends StatefulWidget {
-  const BusEyeMainScreen({super.key});
+class BusEyeRealVisionScreen extends StatefulWidget {
+  const BusEyeRealVisionScreen({super.key});
 
   @override
-  State<BusEyeMainScreen> createState() => _BusEyeMainScreenState();
+  State<BusEyeRealVisionScreen> createState() => _BusEyeRealVisionScreenState();
 }
 
-class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBindingObserver {
+class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with WidgetsBindingObserver {
   final FlutterTts _tts = FlutterTts();
   CameraController? _cameraController;
   bool _isCameraReady = false;
-  bool _isPlaying = false;
-  String _statusText = "스마트폰을 차량 전방에 거치 후 관제를 시작하세요.";
+  bool _isAnalyzing = false;
+  bool _isProcessingFrame = false;
 
-  Timer? _engineTimer;
-  List<TrackedTarget> _activeTargets = [];
-  final List<SafetyEventLog> _logs = [];
+  List<RealDetectedTarget> _detectedTargets = [];
+  String _statusMessage = "카메라 준비 중...";
+  int _analyzedFpsCount = 0;
+  DateTime _lastFpsTime = DateTime.now();
+  int _currentFps = 0;
 
-  int _tick = 0;
-  double _currentSpeed = 0.0;
+  // 실시간 프레임 분석 추적 변수
+  int _previousCenterMass = 0;
+  double _prevTargetSize = 0.0;
+  DateTime _lastFrameTime = DateTime.now();
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
 
   @override
@@ -113,24 +97,21 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
   }
 
   Future<void> _initCamera() async {
-    if (_cameras.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _statusText = "사용 가능한 후면 카메라를 찾을 수 없습니다.";
-        });
-      }
+    if (_availableCameras.isEmpty) {
+      setState(() => _statusMessage = "카메라 장치를 감지할 수 없습니다.");
       return;
     }
 
-    CameraDescription backCamera = _cameras.firstWhere(
+    CameraDescription backCam = _availableCameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.back,
-      orElse: () => _cameras.first,
+      orElse: () => _availableCameras.first,
     );
 
     _cameraController = CameraController(
-      backCamera,
-      ResolutionPreset.high,
+      backCam,
+      ResolutionPreset.medium, // 고속 실시간 영상처리를 위한 최적 해상도
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     try {
@@ -138,226 +119,178 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
       if (mounted) {
         setState(() {
           _isCameraReady = true;
-          _statusText = "전방 카메라 수신 준비 완료 (가동 버튼을 누르세요)";
+          _statusMessage = "실제 카메라 준비 완료. 관제를 시작하세요.";
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _statusText = "카메라 권한을 확인해 주세요.";
-        });
-      }
+      if (mounted) setState(() => _statusMessage = "카메라 권한을 확인해주세요.");
     }
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
+  // 실제 카메라 비디오 프레임 스트림 분석 가동
+  Future<void> _startRealAnalysis() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) return;
-    if (state == AppLifecycleState.inactive) {
-      _cameraController?.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
-    }
-  }
 
-  Future<void> _startSystem() async {
-    await _tts.speak("실시간 비전 안전 관제를 시작합니다.");
-    if (mounted) {
-      setState(() {
-        _isPlaying = true;
-        _currentSpeed = 42.0;
-        _statusText = "● 도로 영상 분석 및 AI 충돌 방지 가동 중";
+    await _tts.speak("실제 비전 AI 안전 관제를 시작합니다.");
+    setState(() {
+      _isAnalyzing = true;
+      _statusMessage = "● 실제 영상 프레임 실시간 분석 중";
+    });
+
+    try {
+      await _cameraController!.startImageStream((CameraImage image) {
+        if (!_isAnalyzing || _isProcessingFrame) return;
+        _isProcessingFrame = true;
+
+        _processActualCameraFrame(image);
       });
+    } catch (e) {
+      debugPrint("스트림 오류: $e");
     }
-    _startAiLoop();
   }
 
-  void _startAiLoop() {
-    _engineTimer?.cancel();
-    _tick = 0;
+  // 실제 카메라 Y-Plane(명도 픽셀) 기반 위험 객체 탐지 및 TTC 계산 엔진
+  void _processActualCameraFrame(CameraImage image) {
+    try {
+      final int width = image.width;
+      final int height = image.height;
+      final Uint8List yPlane = image.planes[0].bytes;
 
-    _engineTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
-      if (!_isPlaying) return;
-      _tick++;
+      // FPS 측정
+      _analyzedFpsCount++;
+      final now = DateTime.now();
+      if (now.difference(_lastFpsTime).inMilliseconds >= 1000) {
+        _currentFps = _analyzedFpsCount;
+        _analyzedFpsCount = 0;
+        _lastFpsTime = now;
+      }
 
-      final mod = _tick % 10;
-      List<TrackedTarget> targets = [];
-      double speed = 40.0 + (sin(_tick * 0.5) * 6.0);
+      // 도로 중심 영역 (ROI: 20% ~ 80% 너비, 40% ~ 85% 높이) 스캔
+      final int startX = (width * 0.20).toInt();
+      final int endX = (width * 0.80).toInt();
+      final int startY = (height * 0.40).toInt();
+      final int endY = (height * 0.85).toInt();
 
-      if (mod >= 0 && mod <= 3) {
-        targets.add(TrackedTarget(
-          id: "CAR_01",
-          label: "선행 차량",
-          screenRect: const Rect.fromLTWH(0.32, 0.46, 0.36, 0.28),
-          distance: 28.4,
-          relativeSpeed: 2.0,
-          ttc: 14.2,
-          threatLevel: ThreatLevel.safe,
-        ));
-      } else if (mod >= 4 && mod <= 6) {
-        final double dist = 11.2 - (mod - 4) * 2.1;
-        final double ttc = dist / 6.5;
-        targets.add(TrackedTarget(
-          id: "CAR_01",
-          label: "전방 급접근",
-          screenRect: const Rect.fromLTWH(0.26, 0.40, 0.48, 0.38),
-          distance: dist,
-          relativeSpeed: 23.4,
-          ttc: ttc,
-          threatLevel: ThreatLevel.warning,
-        ));
+      int edgeMass = 0;
+      int minActiveY = endY;
+      int maxActiveY = startY;
+      int minActiveX = endX;
+      int maxActiveX = startX;
 
-        _logEvent("전방 추돌 위험", dist, ttc, speed);
-        _speakAlert("전방 추돌 주의! 안전거리를 확보하세요.");
-      } else {
-        targets.add(TrackedTarget(
-          id: "CAR_01",
-          label: "선행 차량",
-          screenRect: const Rect.fromLTWH(0.34, 0.48, 0.32, 0.25),
-          distance: 24.0,
-          relativeSpeed: 0.5,
-          ttc: 20.0,
-          threatLevel: ThreatLevel.safe,
-        ));
-        targets.add(TrackedTarget(
-          id: "PED_01",
-          label: "우측 보행자",
-          screenRect: const Rect.fromLTWH(0.74, 0.52, 0.16, 0.26),
-          distance: 8.5,
-          relativeSpeed: 4.0,
-          ttc: 3.5,
-          threatLevel: ThreatLevel.caution,
-        ));
+      // 4픽셀 간격 다운샘플링 고속 엣지/윤곽선 감지
+      for (int y = startY; y < endY; y += 4) {
+        for (int x = startX; x < endX; x += 4) {
+          int index = y * width + x;
+          int rightIndex = index + 4;
+          int bottomIndex = (y + 4) * width + x;
 
-        if (mod == 7) {
-          _logEvent("보행자 접근 주의", 8.5, 3.5, speed);
-          _speakAlert("우측 전방 보행자 주의 구간입니다.");
+          if (rightIndex < yPlane.length && bottomIndex < yPlane.length) {
+            int currentY = yPlane[index];
+            int diffX = (currentY - yPlane[rightIndex]).abs();
+            int diffY = (currentY - yPlane[bottomIndex]).abs();
+
+            if (diffX > 25 || diffY > 25) {
+              edgeMass++;
+              if (x < minActiveX) minActiveX = x;
+              if (x > maxActiveX) maxActiveX = x;
+              if (y < minActiveY) minActiveY = y;
+              if (y > maxActiveY) maxActiveY = y;
+            }
+          }
         }
       }
 
+      List<RealDetectedTarget> targets = [];
+
+      // 유의미한 전방 물체(차량 등)가 검출된 경우
+      if (edgeMass > 150 && maxActiveX > minActiveX && maxActiveY > minActiveY) {
+        double relativeWidth = (maxActiveX - minActiveX) / width;
+        double relativeHeight = (maxActiveY - minActiveY) / height;
+        double boundingArea = relativeWidth * relativeHeight;
+
+        // 카메라 렌즈 수식 기반 거리 추정 (원근법 모델)
+        double estimatedDist = (0.35 / (relativeWidth + 0.001)) * 12.0;
+        if (estimatedDist > 60.0) estimatedDist = 60.0;
+        if (estimatedDist < 2.0) estimatedDist = 2.0;
+
+        // 접근 속도 및 TTC(충돌 예상 시간) 계산
+        double dt = now.difference(_lastFrameTime).inMilliseconds / 1000.0;
+        if (dt <= 0) dt = 0.05;
+
+        double sizeDelta = boundingArea - _prevTargetSize;
+        double approachRate = sizeDelta / dt; // 화면 팽창 속도 (Expansion Rate)
+        _prevTargetSize = boundingArea;
+        _lastFrameTime = now;
+
+        double ttc = 99.9;
+        ThreatLevel threat = ThreatLevel.safe;
+        String label = "전방 차량";
+
+        if (approachRate > 0.03 && estimatedDist < 25.0) {
+          ttc = (estimatedDist / (approachRate * 80.0)).clamp(0.5, 20.0);
+        }
+
+        if (estimatedDist < 10.0 || (ttc < 2.5 && approachRate > 0.05)) {
+          threat = ThreatLevel.warning;
+          label = "급접근 추돌위험";
+          _triggerActualAlert("전방 추돌 주의! 속도를 줄이세요.");
+        } else if (estimatedDist < 18.0 || ttc < 4.5) {
+          threat = ThreatLevel.caution;
+          label = "전방 주의";
+        }
+
+        targets.add(RealDetectedTarget(
+          screenRect: Rect.fromLTRB(
+            minActiveX / width,
+            minActiveY / height,
+            maxActiveX / width,
+            maxActiveY / height,
+          ),
+          estimatedDistance: estimatedDist,
+          ttc: ttc,
+          threat: threat,
+          label: label,
+        ));
+      }
+
       if (mounted) {
         setState(() {
-          _activeTargets = targets;
-          _currentSpeed = speed;
+          _detectedTargets = targets;
         });
       }
-    });
-  }
-
-  void _logEvent(String type, double dist, double ttc, double speed) {
-    if (_logs.isEmpty || DateTime.now().difference(_logs.first.timestamp).inSeconds >= 2) {
-      _logs.insert(
-        0,
-        SafetyEventLog(
-          timestamp: DateTime.now(),
-          eventType: type,
-          distance: dist,
-          ttc: ttc,
-          speed: speed,
-        ),
-      );
-      if (_logs.length > 50) _logs.removeLast();
+    } catch (e) {
+      debugPrint("프레임 연산 예외: $e");
+    } finally {
+      _isProcessingFrame = false;
     }
   }
 
-  Future<void> _speakAlert(String message) async {
+  Future<void> _triggerActualAlert(String message) async {
     final now = DateTime.now();
-    if (now.difference(_lastAlertTime).inSeconds >= 4) {
+    if (now.difference(_lastAlertTime).inSeconds >= 3) {
       _lastAlertTime = now;
       await _tts.speak(message);
     }
   }
 
-  Future<void> _stopSystem() async {
-    _engineTimer?.cancel();
-    if (mounted) {
-      setState(() {
-        _isPlaying = false;
-        _currentSpeed = 0.0;
-        _activeTargets = [];
-        _statusText = "관제 중단됨 (대기 상태)";
-      });
+  Future<void> _stopRealAnalysis() async {
+    if (_cameraController != null && _cameraController!.value.isStreamingImages) {
+      await _cameraController!.stopImageStream();
     }
+    setState(() {
+      _isAnalyzing = false;
+      _detectedTargets = [];
+      _statusMessage = "실제 비전 관제 중단됨";
+    });
     await _tts.speak("안전 관제를 중단합니다.");
-  }
-
-  void _showLogsModal() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF0F172A),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) {
-        return Container(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    "위험 감지 이벤트 블랙박스 로그",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.cyanAccent),
-                  ),
-                  Text("총 ${_logs.length}건", style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                ],
-              ),
-              const Divider(color: Colors.white24, height: 20),
-              Expanded(
-                child: _logs.isEmpty
-                    ? const Center(child: Text("기록된 위험 이벤트가 없습니다.", style: TextStyle(color: Colors.white38)))
-                    : ListView.builder(
-                        itemCount: _logs.length,
-                        itemBuilder: (context, index) {
-                          final log = _logs[index];
-                          final timeStr = "${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}";
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1E293B),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.redAccent.withOpacity(0.4)),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text("[$timeStr] ${log.eventType}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                                    const SizedBox(height: 4),
-                                    Text("거리: ${log.distance.toStringAsFixed(1)}m | 속도: ${log.speed.toStringAsFixed(0)}km/h", style: const TextStyle(color: Colors.white60, fontSize: 12)),
-                                  ],
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.redAccent.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: Colors.redAccent),
-                                  ),
-                                  child: Text("TTC ${log.ttc.toStringAsFixed(1)}s", style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 12)),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _engineTimer?.cancel();
+    if (_cameraController != null && _cameraController!.value.isStreamingImages) {
+      _cameraController?.stopImageStream();
+    }
     _cameraController?.dispose();
     _tts.stop();
     super.dispose();
@@ -365,53 +298,44 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
 
   @override
   Widget build(BuildContext context) {
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
-
     return Scaffold(
       backgroundColor: const Color(0xFF070B12),
       body: SafeArea(
         child: Column(
           children: [
+            // 상단 실시간 상태바
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               color: const Color(0xFF0F172A),
               child: Row(
                 children: [
-                  const Icon(Icons.remove_red_eye_outlined, color: Colors.cyanAccent),
+                  const Icon(Icons.remove_red_eye, color: Colors.cyanAccent),
                   const SizedBox(width: 8),
-                  const Text("BusEye Vision AI", style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
+                  const Text("BusEye Real Vision", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
                   const Spacer(),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
                       color: Colors.black54,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.cyanAccent.withOpacity(0.5)),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.cyanAccent.withOpacity(0.4)),
                     ),
-                    child: Row(
-                      children: [
-                        Text("${_currentSpeed.toStringAsFixed(0)}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.cyanAccent, fontFamily: 'monospace')),
-                        const SizedBox(width: 4),
-                        const Text("km/h", style: TextStyle(fontSize: 11, color: Colors.white70)),
-                      ],
+                    child: Text(
+                      "$_currentFps FPS",
+                      style: const TextStyle(color: Colors.cyanAccent, fontFamily: 'monospace', fontSize: 12),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.history, color: Colors.amberAccent, size: 22),
-                    tooltip: "이벤트 기록",
-                    onPressed: _showLogsModal,
                   ),
                 ],
               ),
             ),
+            // 메인 비디오 뷰포트 + 실시간 분석 박스 오버레이
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: _isPlaying ? Colors.cyanAccent.withOpacity(0.6) : Colors.white24, width: 1.5),
+                  border: Border.all(color: _isAnalyzing ? Colors.cyanAccent : Colors.white24, width: 1.5),
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(15),
@@ -423,50 +347,51 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                       else
                         const Center(child: CircularProgressIndicator(color: Colors.cyanAccent)),
 
-                      if (_isPlaying)
+                      // 실제 감지된 객체 바운딩 박스
+                      if (_isAnalyzing)
                         LayoutBuilder(
                           builder: (context, constraints) {
                             return Stack(
-                              children: _activeTargets.map((target) {
+                              children: _detectedTargets.map((target) {
                                 final left = target.screenRect.left * constraints.maxWidth;
                                 final top = target.screenRect.top * constraints.maxHeight;
                                 final width = target.screenRect.width * constraints.maxWidth;
                                 final height = target.screenRect.height * constraints.maxHeight;
 
-                                Color boxColor = target.threatLevel == ThreatLevel.warning
+                                Color boxColor = target.threat == ThreatLevel.warning
                                     ? Colors.redAccent
-                                    : (target.threatLevel == ThreatLevel.caution ? Colors.amberAccent : Colors.greenAccent);
+                                    : (target.threat == ThreatLevel.caution ? Colors.amberAccent : Colors.greenAccent);
 
                                 return Positioned(
-                                  left: left,
-                                  top: top,
-                                  width: width,
-                                  height: height,
+                                  left: left.clamp(0.0, constraints.maxWidth - 50),
+                                  top: top.clamp(0.0, constraints.maxHeight - 50),
+                                  width: width.clamp(40.0, constraints.maxWidth),
+                                  height: height.clamp(30.0, constraints.maxHeight),
                                   child: Container(
                                     decoration: BoxDecoration(
                                       border: Border.all(color: boxColor, width: 2.5),
                                       borderRadius: BorderRadius.circular(6),
-                                      color: boxColor.withOpacity(0.12),
+                                      color: boxColor.withOpacity(0.15),
                                     ),
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                                           color: boxColor,
                                           child: Text(
-                                            "${target.label} | ${target.distance.toStringAsFixed(1)}m",
-                                            style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold),
+                                            "${target.label} | ${target.estimatedDistance.toStringAsFixed(1)}m",
+                                            style: const TextStyle(color: Colors.black, fontSize: 11, fontWeight: FontWeight.bold),
                                           ),
                                         ),
                                         const Spacer(),
-                                        if (target.threatLevel == ThreatLevel.warning)
+                                        if (target.threat == ThreatLevel.warning)
                                           Container(
                                             alignment: Alignment.centerRight,
                                             padding: const EdgeInsets.all(4),
                                             child: Text(
                                               "TTC ${target.ttc.toStringAsFixed(1)}s",
-                                              style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                                              style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold),
                                             ),
                                           ),
                                       ],
@@ -478,23 +403,7 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                           },
                         ),
 
-                      if (_isPlaying)
-                        Positioned(
-                          top: 10,
-                          right: 10,
-                          child: Container(
-                            width: isLandscape ? 120 : 95,
-                            height: isLandscape ? 110 : 100,
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.7),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.cyanAccent.withOpacity(0.5)),
-                            ),
-                            child: CustomPaint(painter: MiniRadarPainter(targets: _activeTargets)),
-                          ),
-                        ),
-
+                      // 하단 상태바
                       Positioned(
                         bottom: 0,
                         left: 0,
@@ -503,8 +412,8 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
                           color: Colors.black.withOpacity(0.8),
                           child: Text(
-                            _statusText,
-                            style: const TextStyle(color: Colors.cyanAccent, fontSize: 11),
+                            _statusMessage,
+                            style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
                             textAlign: TextAlign.center,
                           ),
                         ),
@@ -514,27 +423,25 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
                 ),
               ),
             ),
+            // 하단 가동 버튼
             Padding(
               padding: const EdgeInsets.only(left: 12, right: 12, bottom: 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isPlaying ? Colors.redAccent : Colors.cyanAccent,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      onPressed: !_isCameraReady ? null : (_isPlaying ? _stopSystem : _startSystem),
-                      icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 24),
-                      label: Text(
-                        _isPlaying ? "관제 중단" : "실시간 비전 관제 가동",
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                      ),
-                    ),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isAnalyzing ? Colors.redAccent : Colors.cyanAccent,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                ],
+                  onPressed: !_isCameraReady ? null : (_isAnalyzing ? _stopRealAnalysis : _startRealAnalysis),
+                  icon: Icon(_isAnalyzing ? Icons.stop : Icons.play_arrow, size: 24),
+                  label: Text(
+                    _isAnalyzing ? "실제 관제 중단" : "실시간 비전 AI 관제 가동",
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
               ),
             ),
           ],
@@ -542,39 +449,4 @@ class _BusEyeMainScreenState extends State<BusEyeMainScreen> with WidgetsBinding
       ),
     );
   }
-}
-
-class MiniRadarPainter extends CustomPainter {
-  final List<TrackedTarget> targets;
-  MiniRadarPainter({required this.targets});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.cyanAccent.withOpacity(0.4)
-      ..strokeWidth = 1
-      ..style = PaintingStyle.stroke;
-
-    final center = Offset(size.width * 0.5, size.height * 0.85);
-    canvas.drawCircle(center, size.width * 0.3, paint);
-    canvas.drawCircle(center, size.width * 0.6, paint);
-
-    final myCarPaint = Paint()..color = Colors.cyanAccent..style = PaintingStyle.fill;
-    canvas.drawCircle(center, 3.5, myCarPaint);
-
-    for (var t in targets) {
-      Color targetColor = t.threatLevel == ThreatLevel.warning
-          ? Colors.redAccent
-          : (t.threatLevel == ThreatLevel.caution ? Colors.amberAccent : Colors.greenAccent);
-
-      final tPaint = Paint()..color = targetColor..style = PaintingStyle.fill;
-      final xOffset = (t.screenRect.center.dx - 0.5) * size.width * 1.2;
-      final yOffset = -(t.distance / 35.0) * (size.height * 0.7);
-
-      canvas.drawCircle(Offset(center.dx + xOffset, center.dy + yOffset), 4, tPaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
