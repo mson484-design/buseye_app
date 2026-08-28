@@ -25,8 +25,16 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
+      - name: Recreate Standard Android Skeleton
+        run: |
+          flutter create --platforms=android .
+
       - name: Accept Android Licenses
         run: yes | flutter doctor --android-licenses || true
+
+      - name: Set MinSdkVersion in Gradle
+        run: |
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
 
       - name: Get Dependencies
         run: flutter pub get
