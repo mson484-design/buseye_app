@@ -2,7 +2,7 @@ name: Build BusEye APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -13,30 +13,26 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
-    - name: Set up Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
           channel: 'stable'
-          cache: true
 
-      - name: Build APK
-        run: |
-          flutter create --org com.buseye.app buseye_project
-          cd buseye_project
-          flutter pub add geolocator flutter_tts
-          cp -f ../lib/main.dart ./lib/main.dart
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
-          flutter build apk --release
+      - name: Get Dependencies
+        run: flutter pub get
 
-      - name: Upload APK
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: buseye_project/build/app/outputs/flutter-apk/app-release.apk
+          name: buseye-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
