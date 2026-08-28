@@ -25,10 +25,12 @@ android {
     compileSdkVersion 34
 
     defaultConfig {
-        applicationId "com.buseye.safety"
-        minSdkVersion 21
-        targetSdkVersion 34
-        versionCode 1
+    applicationId "com.example.buseye_app"
+    minSdkVersion 21
+    targetSdkVersion flutter.targetSdkVersion
+    versionCode flutterVersionCode.toInteger()
+    versionName flutterVersionName
+}
         versionName "1.0"
     }
 
