@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Code
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Set up Java 17
@@ -23,6 +23,25 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         channel: 'stable'
+
+    - name: Align Android Structure & Compatibility
+      run: |
+        # 1. 최신 안드로이드 소스 표준 경로 생성
+        mkdir -p android/app/src/main/kotlin/com/buseye/safety
+        mkdir -p android/app/src/main/res/values
+
+        # 2. 루트에 잘못 나와 있는 코틀린 파일들을 표준 패키지 폴더로 이동/정리
+        if [ -f "android/MainActivity.kt" ]; then
+          mv android/*.kt android/app/src/main/kotlin/com/buseye/safety/ 2>/dev/null || true
+        fi
+
+        # 3. AndroidManifest v1 임베딩 태그 일괄 제거
+        if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+          sed -i '/flutterEmbedding/d' android/app/src/main/AndroidManifest.xml || true
+        fi
+        if [ -f "android/AndroidManifest.xml" ]; then
+          sed -i '/flutterEmbedding/d' android/AndroidManifest.xml || true
+        fi
 
     - name: Install Dependencies
       run: flutter pub get
