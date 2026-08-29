@@ -24,26 +24,14 @@ jobs:
       with:
         channel: 'stable'
 
-    - name: Reconstruct Android v2 Embedding
+    - name: Clean & Recreate Android Standard Files
       run: |
-        # 1. 구형 v1 흔적이 있는 파일 정리
-        rm -rf android/app/src/main/java 2>/dev/null || true
-        mkdir -p android/app/src/main/kotlin/com/buseye/safety
+        # 1. 구형 안드로이드 폴더 완전 정리 및 표준 v2 뼈대 자동 재생성
+        rm -rf android/
+        flutter create . --platforms=android --org com.buseye.safety
 
-        # 2. 최신 v2 FlutterActivity 표준 파일 생성
-        cat << 'EOF' > android/app/src/main/kotlin/com/buseye/safety/MainActivity.kt
-        package com.buseye.safety
-
-        import io.flutter.embedding.android.FlutterActivity
-
-        class MainActivity: FlutterActivity() {
-        }
-        EOF
-
-        # 3. AndroidManifest 내 v1 태그 잔여물 완전 제거
-        if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
-          sed -i '/flutterEmbedding/d' android/app/src/main/AndroidManifest.xml || true
-        fi
+        # 2. 버스아이 필수 권한(카메라, 위치) 자동 주입
+        sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' android/app/src/main/AndroidManifest.xml
 
     - name: Install Dependencies
       run: flutter pub get
