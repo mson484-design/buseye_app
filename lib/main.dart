@@ -35,7 +35,10 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
   Color boxColor = Colors.greenAccent;
   double estimatedDistance = 15.0;
   String alertMessage = "전방 안전 확보";
-  int warningLevel = 0; // 0:안전, 1:주의, 2:경고, 3:위험
+  
+  int warningLevel = 0; // 0:안전, 1:주의, 2:위험
+  int lastSpokenLevel = 0; // 이전에 말한 단계 기억
+  DateTime lastSpokenTime = DateTime.now(); // 마지막으로 말한 시각
 
   @override
   void initState() {
@@ -65,37 +68,50 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
     }
   }
 
-  // 실시간 비전 감지 루프 (0.5초 간격 갱신)
+  // 멘트 중복 방지 음성 출력 함수
+  void speakAlertOnce(String text, int currentLevel) {
+    final now = DateTime.now();
+    final timeDiff = now.difference(lastSpokenTime).inSeconds;
+
+    // 1. 단계가 바뀌었거나 (안전->주의, 주의->위험)
+    // 2. 같은 단계라도 3초 이상 지났을 때만 1회 출력
+    if (lastSpokenLevel != currentLevel || timeDiff >= 3) {
+      flutterTts.speak(text);
+      lastSpokenLevel = currentLevel;
+      lastSpokenTime = now;
+    }
+  }
+
   void startVisionEngine() {
     visionLoopTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       if (!isRunning) return;
 
-      // 주행 분석 (실제 주행 시뮬레이션 및 전방 물체 감지 가중치)
       setState(() {
-        // 상황별 거리 감지 및 알림 트리거 테스트 로직
+        // 거리 시뮬레이션
         if (estimatedDistance > 4.0) {
-          estimatedDistance -= 1.5; // 접근 시뮬레이션
+          estimatedDistance -= 1.5;
         } else {
-          estimatedDistance = 15.0; // 리셋
+          estimatedDistance = 15.0;
         }
 
         if (estimatedDistance <= 4.0) {
           driveStatus = "위험 추돌 경고";
           boxColor = Colors.redAccent;
           alertMessage = "전방 급접근! 추돌 주의!";
-          warningLevel = 3;
-          flutterTts.speak("위험 전방 주시 브레이크");
+          warningLevel = 2;
+          speakAlertOnce("위험 전방 주시 브레이크", 2);
         } else if (estimatedDistance <= 7.0) {
           driveStatus = "서행 접근 주의";
           boxColor = Colors.orangeAccent;
           alertMessage = "앞차 접근 중 | 감속";
-          warningLevel = 2;
-          flutterTts.speak("앞차 주의");
+          warningLevel = 1;
+          speakAlertOnce("앞차 주의", 1);
         } else {
           driveStatus = "정상 주행 중";
           boxColor = Colors.greenAccent;
           alertMessage = "안전 거리 유지";
           warningLevel = 0;
+          lastSpokenLevel = 0; // 안전 구역 복귀 시 단계 초기화
         }
       });
     });
@@ -124,14 +140,14 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. 카메라 전체화면 뷰파인더
+          // 1. 카메라 프리뷰
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 2. 상단 상태 알림 바
+          // 2. 상단 상태바
           Positioned(
             top: 40,
             left: 15,
@@ -141,7 +157,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
               decoration: BoxDecoration(
                 color: Colors.black87,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: boxColor, width: 1.5),
+                border: borderDecoration(boxColor),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -163,9 +179,9 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
             ),
           ),
 
-          // 3. 전방 도로 집중 타겟팅 박스 (차선/차량 중심 하단 배치)
+          // 3. 전방 타겟팅 박스
           Align(
-            alignment: const Alignment(0, 0.4), // 도로 전방으로 영역 강제 하향
+            alignment: const Alignment(0, 0.4),
             child: Container(
               width: size.width * 0.75,
               height: size.height * 0.35,
@@ -201,7 +217,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
             ),
           ),
 
-          // 4. 하단 제어 및 종료 버튼
+          // 4. 하단 제어 버튼
           Positioned(
             bottom: 30,
             left: 20,
@@ -236,5 +252,9 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
         ],
       ),
     );
+  }
+
+  Border borderDecoration(Color color) {
+    return Border.all(color: color, width: 1.5);
   }
 }
