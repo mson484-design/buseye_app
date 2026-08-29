@@ -21,21 +21,13 @@ jobs:
     - name: Set up Flutter
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: '3.19.6'
         channel: 'stable'
-
-    - name: Fix Android Manifest & Gradle
-      run: |
-        # flutterEmbedding v1 제거 및 v2 호환성 강제
-        if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
-          sed -i '/flutterEmbedding/d' android/app/src/main/AndroidManifest.xml || true
-        fi
 
     - name: Install Dependencies
       run: flutter pub get
 
     - name: Build Release APK
-      run: flutter build apk --release --no-tree-shake-icons
+      run: flutter build apk --release
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
