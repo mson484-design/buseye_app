@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 List<CameraDescription> _availableCameras = [];
 
@@ -21,19 +23,19 @@ Future<void> main() async {
     debugPrint('카메라 초기화 오류: $e');
   }
 
-  runApp(const BusEyeRealVisionApp());
+  runApp(const BusEyeGpsVisionApp());
 }
 
-class BusEyeRealVisionApp extends StatelessWidget {
-  const BusEyeRealVisionApp({super.key});
+class BusEyeGpsVisionApp extends StatelessWidget {
+  const BusEyeGpsVisionApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BusEye Real Vision',
+      title: 'BusEye GPS Vision',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      home: const BusEyeRealVisionScreen(),
+      home: const BusEyeGpsVisionScreen(),
     );
   }
 }
@@ -56,28 +58,29 @@ class RealDetectedTarget {
   });
 }
 
-class BusEyeRealVisionScreen extends StatefulWidget {
-  const BusEyeRealVisionScreen({super.key});
+class BusEyeGpsVisionScreen extends StatefulWidget {
+  const BusEyeGpsVisionScreen({super.key});
 
   @override
-  State<BusEyeRealVisionScreen> createState() => _BusEyeRealVisionScreenState();
+  State<BusEyeGpsVisionScreen> createState() => _BusEyeGpsVisionScreenState();
 }
 
-class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with WidgetsBindingObserver {
+class _BusEyeGpsVisionScreenState extends State<BusEyeGpsVisionScreen> with WidgetsBindingObserver {
   final FlutterTts _tts = FlutterTts();
   CameraController? _cameraController;
+  StreamSubscription<Position>? _gpsStreamSubscription;
+
   bool _isCameraReady = false;
   bool _isAnalyzing = false;
   bool _isProcessingFrame = false;
 
+  double _currentSpeedKmh = 0.0; // 실제 GPS 주행 속도
   List<RealDetectedTarget> _detectedTargets = [];
-  String _statusMessage = "카메라 준비 중...";
+  String _statusMessage = "위치 권한 확인 및 카메라 준비 중...";
   int _analyzedFpsCount = 0;
   DateTime _lastFpsTime = DateTime.now();
   int _currentFps = 0;
 
-  // 실시간 프레임 분석 추적 변수
-  int _previousCenterMass = 0;
   double _prevTargetSize = 0.0;
   DateTime _lastFrameTime = DateTime.now();
   DateTime _lastAlertTime = DateTime.now().subtract(const Duration(seconds: 10));
@@ -86,14 +89,47 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initTts();
-    _initCamera();
+    _initSystem();
+  }
+
+  Future<void> _initSystem() async {
+    await _initTts();
+    await _requestPermissions();
+    await _initCamera();
+    _startGpsTracking();
   }
 
   Future<void> _initTts() async {
     await _tts.setLanguage("ko-KR");
     await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
+  }
+
+  Future<void> _requestPermissions() async {
+    await [Permission.camera, Permission.location].request();
+  }
+
+  // 실시간 GPS 속도 측정 리스너
+  void _startGpsTracking() {
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 1,
+    );
+
+    _gpsStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings).listen(
+      (Position position) {
+        // m/s -> km/h 변환 (음수 방지)
+        double speed = (position.speed < 0) ? 0.0 : (position.speed * 3.6);
+        if (mounted) {
+          setState(() {
+            _currentSpeedKmh = speed;
+          });
+        }
+      },
+      onError: (e) {
+        debugPrint("GPS 수신 오류: $e");
+      },
+    );
   }
 
   Future<void> _initCamera() async {
@@ -109,7 +145,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
 
     _cameraController = CameraController(
       backCam,
-      ResolutionPreset.medium, // 고속 실시간 영상처리를 위한 최적 해상도
+      ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
@@ -119,7 +155,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
       if (mounted) {
         setState(() {
           _isCameraReady = true;
-          _statusMessage = "실제 카메라 준비 완료. 관제를 시작하세요.";
+          _statusMessage = "GPS 연동 준비 완료. 관제를 시작하세요.";
         });
       }
     } catch (e) {
@@ -127,21 +163,19 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
     }
   }
 
-  // 실제 카메라 비디오 프레임 스트림 분석 가동
   Future<void> _startRealAnalysis() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) return;
 
-    await _tts.speak("실제 비전 AI 안전 관제를 시작합니다.");
+    await _tts.speak("GPS 연동 실시간 비전 관제를 시작합니다.");
     setState(() {
       _isAnalyzing = true;
-      _statusMessage = "● 실제 영상 프레임 실시간 분석 중";
+      _statusMessage = "● GPS 속도 기반 위험 분석 가동 중";
     });
 
     try {
       await _cameraController!.startImageStream((CameraImage image) {
         if (!_isAnalyzing || _isProcessingFrame) return;
         _isProcessingFrame = true;
-
         _processActualCameraFrame(image);
       });
     } catch (e) {
@@ -149,14 +183,12 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
     }
   }
 
-  // 실제 카메라 Y-Plane(명도 픽셀) 기반 위험 객체 탐지 및 TTC 계산 엔진
   void _processActualCameraFrame(CameraImage image) {
     try {
       final int width = image.width;
       final int height = image.height;
       final Uint8List yPlane = image.planes[0].bytes;
 
-      // FPS 측정
       _analyzedFpsCount++;
       final now = DateTime.now();
       if (now.difference(_lastFpsTime).inMilliseconds >= 1000) {
@@ -165,11 +197,11 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
         _lastFpsTime = now;
       }
 
-      // 도로 중심 영역 (ROI: 20% ~ 80% 너비, 40% ~ 85% 높이) 스캔
-      final int startX = (width * 0.20).toInt();
-      final int endX = (width * 0.80).toInt();
+      // 도로 중심 ROI 영역 (노면 및 상단 하늘 제외)
+      final int startX = (width * 0.25).toInt();
+      final int endX = (width * 0.75).toInt();
       final int startY = (height * 0.40).toInt();
-      final int endY = (height * 0.85).toInt();
+      final int endY = (height * 0.80).toInt();
 
       int edgeMass = 0;
       int minActiveY = endY;
@@ -177,7 +209,6 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
       int minActiveX = endX;
       int maxActiveX = startX;
 
-      // 4픽셀 간격 다운샘플링 고속 엣지/윤곽선 감지
       for (int y = startY; y < endY; y += 4) {
         for (int x = startX; x < endX; x += 4) {
           int index = y * width + x;
@@ -189,7 +220,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
             int diffX = (currentY - yPlane[rightIndex]).abs();
             int diffY = (currentY - yPlane[bottomIndex]).abs();
 
-            if (diffX > 25 || diffY > 25) {
+            if (diffX > 30 || diffY > 30) {
               edgeMass++;
               if (x < minActiveX) minActiveX = x;
               if (x > maxActiveX) maxActiveX = x;
@@ -202,41 +233,46 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
 
       List<RealDetectedTarget> targets = [];
 
-      // 유의미한 전방 물체(차량 등)가 검출된 경우
-      if (edgeMass > 150 && maxActiveX > minActiveX && maxActiveY > minActiveY) {
+      // 유효 객체 감지 조건
+      if (edgeMass > 180 && maxActiveX > minActiveX && maxActiveY > minActiveY) {
         double relativeWidth = (maxActiveX - minActiveX) / width;
         double relativeHeight = (maxActiveY - minActiveY) / height;
         double boundingArea = relativeWidth * relativeHeight;
 
-        // 카메라 렌즈 수식 기반 거리 추정 (원근법 모델)
         double estimatedDist = (0.35 / (relativeWidth + 0.001)) * 12.0;
-        if (estimatedDist > 60.0) estimatedDist = 60.0;
-        if (estimatedDist < 2.0) estimatedDist = 2.0;
+        estimatedDist = estimatedDist.clamp(2.0, 60.0);
 
-        // 접근 속도 및 TTC(충돌 예상 시간) 계산
         double dt = now.difference(_lastFrameTime).inMilliseconds / 1000.0;
         if (dt <= 0) dt = 0.05;
 
         double sizeDelta = boundingArea - _prevTargetSize;
-        double approachRate = sizeDelta / dt; // 화면 팽창 속도 (Expansion Rate)
+        double approachRate = sizeDelta / dt;
         _prevTargetSize = boundingArea;
         _lastFrameTime = now;
 
         double ttc = 99.9;
         ThreatLevel threat = ThreatLevel.safe;
-        String label = "전방 차량";
+        String label = "전방 객체";
 
-        if (approachRate > 0.03 && estimatedDist < 25.0) {
+        // 실제 내 차량이 시속 5km/h 이상 주행 중일 때만 TTC 계산 활성화
+        if (_currentSpeedKmh > 5.0 && approachRate > 0.02) {
           ttc = (estimatedDist / (approachRate * 80.0)).clamp(0.5, 20.0);
         }
 
-        if (estimatedDist < 10.0 || (ttc < 2.5 && approachRate > 0.05)) {
-          threat = ThreatLevel.warning;
-          label = "급접근 추돌위험";
-          _triggerActualAlert("전방 추돌 주의! 속도를 줄이세요.");
-        } else if (estimatedDist < 18.0 || ttc < 4.5) {
-          threat = ThreatLevel.caution;
-          label = "전방 주의";
+        // 위험 단계 판단 (속도가 0~5km/h 일 때는 경고 절대 금지)
+        if (_currentSpeedKmh > 5.0) {
+          if (ttc < 2.2 || (estimatedDist < 8.0 && _currentSpeedKmh > 20.0)) {
+            threat = ThreatLevel.warning;
+            label = "추돌 위험!";
+            _triggerActualAlert("전방 추돌 주의! 감속하세요.");
+          } else if (ttc < 4.0 || estimatedDist < 15.0) {
+            threat = ThreatLevel.caution;
+            label = "전방 주의";
+          }
+        } else {
+          // 정차/서행 시에는 안전 표시만 유지
+          threat = ThreatLevel.safe;
+          label = "전방 대기";
         }
 
         targets.add(RealDetectedTarget(
@@ -280,7 +316,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
     setState(() {
       _isAnalyzing = false;
       _detectedTargets = [];
-      _statusMessage = "실제 비전 관제 중단됨";
+      _statusMessage = "관제 중단됨";
     });
     await _tts.speak("안전 관제를 중단합니다.");
   }
@@ -288,6 +324,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _gpsStreamSubscription?.cancel();
     if (_cameraController != null && _cameraController!.value.isStreamingImages) {
       _cameraController?.stopImageStream();
     }
@@ -303,15 +340,17 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
       body: SafeArea(
         child: Column(
           children: [
-            // 상단 실시간 상태바
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               color: const Color(0xFF0F172A),
               child: Row(
                 children: [
-                  const Icon(Icons.remove_red_eye, color: Colors.cyanAccent),
+                  const Icon(Icons.speed, color: Colors.cyanAccent),
                   const SizedBox(width: 8),
-                  const Text("BusEye Real Vision", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                  Text(
+                    "${_currentSpeedKmh.toStringAsFixed(0)} km/h",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.cyanAccent, fontFamily: 'monospace'),
+                  ),
                   const Spacer(),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -328,7 +367,6 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                 ],
               ),
             ),
-            // 메인 비디오 뷰포트 + 실시간 분석 박스 오버레이
             Expanded(
               child: Container(
                 margin: const EdgeInsets.all(8),
@@ -347,7 +385,6 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                       else
                         const Center(child: CircularProgressIndicator(color: Colors.cyanAccent)),
 
-                      // 실제 감지된 객체 바운딩 박스
                       if (_isAnalyzing)
                         LayoutBuilder(
                           builder: (context, constraints) {
@@ -385,7 +422,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                                           ),
                                         ),
                                         const Spacer(),
-                                        if (target.threat == ThreatLevel.warning)
+                                        if (target.threat == ThreatLevel.warning && target.ttc < 10.0)
                                           Container(
                                             alignment: Alignment.centerRight,
                                             padding: const EdgeInsets.all(4),
@@ -403,7 +440,6 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                           },
                         ),
 
-                      // 하단 상태바
                       Positioned(
                         bottom: 0,
                         left: 0,
@@ -423,7 +459,6 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                 ),
               ),
             ),
-            // 하단 가동 버튼
             Padding(
               padding: const EdgeInsets.only(left: 12, right: 12, bottom: 12),
               child: SizedBox(
@@ -438,7 +473,7 @@ class _BusEyeRealVisionScreenState extends State<BusEyeRealVisionScreen> with Wi
                   onPressed: !_isCameraReady ? null : (_isAnalyzing ? _stopRealAnalysis : _startRealAnalysis),
                   icon: Icon(_isAnalyzing ? Icons.stop : Icons.play_arrow, size: 24),
                   label: Text(
-                    _isAnalyzing ? "실제 관제 중단" : "실시간 비전 AI 관제 가동",
+                    _isAnalyzing ? "실제 관제 중단" : "GPS 연동 비전 관제 가동",
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ),
