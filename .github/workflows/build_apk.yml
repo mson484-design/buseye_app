@@ -21,12 +21,15 @@ jobs:
     - name: Set up Flutter
       uses: subosito/flutter-action@v2
       with:
+        flutter-version: '3.19.6'
         channel: 'stable'
 
-    - name: Fix Android v1 Embedding Issue
+    - name: Fix Android Manifest & Gradle
       run: |
-        sed -i 's/android:value="1"/android:value="2"/g' android/app/src/main/AndroidManifest.xml || true
-        sed -i 's/ext.kotlin_version = .*/ext.kotlin_version = "1.9.24"/' android/build.gradle || true
+        # flutterEmbedding v1 제거 및 v2 호환성 강제
+        if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+          sed -i '/flutterEmbedding/d' android/app/src/main/AndroidManifest.xml || true
+        fi
 
     - name: Install Dependencies
       run: flutter pub get
