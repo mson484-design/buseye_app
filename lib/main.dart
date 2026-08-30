@@ -14,40 +14,39 @@ Future<void> main() async {
     print('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: BoundingBoxTrackingScreen(),
+    home: CorridorSafetyScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class BoundingBoxTrackingScreen extends StatefulWidget {
-  const BoundingBoxTrackingScreen({Key? key}) : super(key: key);
+class CorridorSafetyScreen extends StatefulWidget {
+  const CorridorSafetyScreen({Key? key}) : super(key: key);
 
   @override
-  State<BoundingBoxTrackingScreen> createState() => _BoundingBoxTrackingScreenState();
+  State<CorridorSafetyScreen> createState() => _CorridorSafetyScreenState();
 }
 
-class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
+class _CorridorSafetyScreenState extends State<CorridorSafetyScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
   bool isProcessing = false;
 
-  String driveStatus = "객체 궤적 추론 관제 중";
+  String driveStatus = "차로 궤적 관제 중";
   Color boxColor = Colors.greenAccent;
-  String alertMessage = "전방 및 사각지대 안전";
+  String alertMessage = "차로 및 사각지대 안전 확보";
 
-  // 객체 바운딩 박스 상태 정보
-  Rect? activeBoundingBox;
+  Rect? activeCorridorThreatBox;
   String targetZone = "안전";
 
-  // TTS 하드 락 (8초)
+  // TTS 8초 하드 락
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
   List<int>? prevFrameBytes;
   int frameSkipCounter = 0;
-  int threatCount = 0;
+  int confirmedThreatFrames = 0;
 
   @override
   void initState() {
@@ -73,46 +72,46 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
       controller!.initialize().then((_) {
         if (!mounted) return;
         setState(() {});
-        startTrackingStream();
+        startCorridorStream();
       });
     }
   }
 
-  void startTrackingStream() {
+  void startCorridorStream() {
     controller?.startImageStream((CameraImage image) {
       if (!isRunning || isProcessing) return;
 
       frameSkipCounter++;
-      if (frameSkipCounter % 3 != 0) return; // 10 FPS
+      if (frameSkipCounter % 3 != 0) return;
 
       isProcessing = true;
-      computeObjectBoundingBoxAndTrajectory(image);
+      processCorridorCollision(image);
     });
   }
 
-  // [핵심] 식별된 객체의 바운딩 박스 추출 및 궤적(크기 팽창 및 위치) 연산
-  void computeObjectBoundingBoxAndTrajectory(CameraImage image) {
+  // [핵심] 차로 폭(Corridor) 기준 정지 주차 차량 배제 및 정면/사각지대 충돌체 판정
+  void processCorridorCollision(CameraImage image) {
     try {
       final plane = image.planes[0];
       final bytes = plane.bytes;
       final width = image.width;
       final height = image.height;
 
+      // 주행 차로 폭 기준 정의 (화면 가로 중앙 30% ~ 70% 구역을 유효 주행로로 설정)
+      int corridorLeft = (width * 0.30).toInt();
+      int corridorRight = (width * 0.70).toInt();
+      int scanTop = (height * 0.35).toInt();
+      int scanBottom = (height * 0.88).toInt();
+
       int minX = width, maxX = 0;
       int minY = height, maxY = 0;
-      int motionPixelCount = 0;
+      int inCorridorMotionPixels = 0;
 
       List<int> currentSamples = [];
       int sampleIdx = 0;
 
-      // 전방 및 사각지대 영역 스캔 (하늘 제외, 세로 35% ~ 90%)
-      int startY = (height * 0.35).toInt();
-      int endY = (height * 0.90).toInt();
-      int startX = (width * 0.10).toInt();
-      int endX = (width * 0.90).toInt();
-
-      for (int y = startY; y < endY; y += 12) {
-        for (int x = startX; x < endX; x += 12) {
+      for (int y = scanTop; y < scanBottom; y += 12) {
+        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 12) {
           int byteIdx = y * plane.bytesPerRow + x;
           if (byteIdx < bytes.length) {
             int curVal = bytes[byteIdx];
@@ -120,14 +119,19 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
 
             if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
               int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
-              
-              // 배경(정지물)을 제외하고 독립적으로 움직이는 객체 픽셀 추출 (임계값 55)
-              if (diff > 55) {
-                minX = min(minX, x);
-                maxX = max(maxX, x);
-                minY = min(minY, y);
-                maxY = max(maxY, y);
-                motionPixelCount++;
+
+              // 픽셀 변화가 기준 이상일 때
+              if (diff > 60) {
+                // [필터 1] 차로 바깥쪽(양옆 주차된 차량 구역)의 단순 상대 운동은 완전 무시
+                bool isInDrivingCorridor = (x >= corridorLeft && x <= corridorRight);
+                
+                if (isInDrivingCorridor) {
+                  minX = min(minX, x);
+                  maxX = max(maxX, x);
+                  minY = min(minY, y);
+                  maxY = max(maxY, y);
+                  inCorridorMotionPixels++;
+                }
               }
             }
             sampleIdx++;
@@ -137,88 +141,87 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
 
       prevFrameBytes = currentSamples;
 
-      // 노이즈(TV 플리커, 미세 흔들림) 필터링: 최소 크기 이상의 응집된 객체만 바운딩 박스로 인정
-      if (motionPixelCount < 12 || minX >= maxX || minY >= maxY) {
+      // 차로 내부에 응집된 객체가 없으면 즉시 안전 상태 복귀
+      if (inCorridorMotionPixels < 15 || minX >= maxX || minY >= maxY) {
         setState(() {
-          activeBoundingBox = null;
+          activeCorridorThreatBox = null;
           targetZone = "안전";
-          if (driveStatus != "객체 궤적 추론 관제 중") {
-            driveStatus = "객체 궤적 추론 관제 중";
+          if (driveStatus != "차로 궤적 관제 중") {
+            driveStatus = "차로 궤적 관제 중";
             boxColor = Colors.greenAccent;
-            alertMessage = "전방 및 사각지대 안전";
+            alertMessage = "차로 및 사각지대 안전 확보";
           }
         });
+        confirmedThreatFrames = 0;
         isProcessing = false;
         return;
       }
 
-      // 1. 객체의 실시간 바운딩 박스 확정
-      Rect detectedBox = Rect.fromLTRB(
+      // 차로 내 충돌 위협 객체 바운딩 박스
+      Rect threatBox = Rect.fromLTRB(
         minX.toDouble(),
         minY.toDouble(),
         maxX.toDouble(),
         maxY.toDouble(),
       );
 
-      // 2. 박스의 위치(Zone) 및 궤적 판단
-      double boxCenterX = detectedBox.center.dx / width;
-      double boxBottomY = detectedBox.bottom / height;
-      double boxArea = detectedBox.width * detectedBox.height;
-      double screenArea = (width * height).toDouble();
-      double areaRatio = boxArea / screenArea;
+      double boxBottomY = threatBox.bottom / height;
+      double boxArea = threatBox.width * threatBox.height;
+      double corridorArea = (corridorRight - corridorLeft) * (scanBottom - scanTop).toDouble();
+      double corridorOccupancy = boxArea / corridorArea;
 
-      String zoneStr = "전방";
-      Color dangerCol = Colors.orangeAccent;
-      String ttsCommand = "전방 위험 감속하십시오";
-      String statusStr = "전방 객체 접근";
+      String zoneStr = "차로 전방";
+      Color dangerColor = Colors.orangeAccent;
+      String ttsText = "전방 위험 감속하십시오";
+      String statusStr = "전방 객체 감지";
 
-      // 판정 기준 1: 전방 하단 사각지대 (범퍼 앞 0~2m 지면 구역, 하단 75% 이상)
-      if (boxBottomY > 0.75 && areaRatio > 0.03) {
+      // 1. 전방 하단 사각지대 (내 진행 차로 바로 앞 0~2m 지면에 머무는 장애물/주취자)
+      if (boxBottomY > 0.78 && corridorOccupancy > 0.08) {
         zoneStr = "전방 하단 사각지대";
-        dangerCol = Colors.redAccent;
-        ttsCommand = "사각지대 위험 즉시 제동";
-        statusStr = "사각지대 위험 감지";
-        threatCount += 2;
+        dangerColor = Colors.redAccent;
+        ttsText = "사각지대 위험 즉시 제동";
+        statusStr = "사각지대 객체 감지";
+        confirmedThreatFrames += 2;
       }
-      // 판정 기준 2: 측면 회전 궤적 사각지대 (좌우 모서리 파고듦)
-      else if (boxCenterX < 0.28 || boxCenterX > 0.72) {
-        zoneStr = boxCenterX < 0.28 ? "좌측 사각지대" : "우측 사각지대";
-        dangerCol = Colors.orangeAccent;
-        ttsCommand = "측면 사각지대 위험 감속";
-        statusStr = "측면 궤적 객체 침입";
-        threatCount += 1;
-      }
-      // 판정 기준 3: 정면 충돌 궤적 (면적이 급격히 커지며 중앙으로 돌진)
-      else if (areaRatio > 0.08) {
+      // 2. 정면 충돌 궤적 (차로 폭을 25% 이상 틀어막으며 접근)
+      else if (corridorOccupancy > 0.20) {
         zoneStr = "정면 충돌 궤적";
-        dangerCol = Colors.redAccent;
-        ttsCommand = "위험 전방 주시 브레이크";
+        dangerColor = Colors.redAccent;
+        ttsText = "위험 전방 주시 브레이크";
         statusStr = "전방 급접근 충돌 위험";
-        threatCount += 2;
+        confirmedThreatFrames += 2;
+      } 
+      // 3. 차로 내 단순 감속 대상
+      else if (corridorOccupancy > 0.08) {
+        zoneStr = "차로 내 전방 객체";
+        dangerColor = Colors.orangeAccent;
+        ttsText = "전방 위험 감속하십시오";
+        statusStr = "전방 감속 주의";
+        confirmedThreatFrames += 1;
       } else {
-        threatCount = max(0, threatCount - 1);
+        confirmedThreatFrames = max(0, confirmedThreatFrames - 1);
       }
 
       setState(() {
-        activeBoundingBox = detectedBox;
+        activeCorridorThreatBox = threatBox;
         targetZone = zoneStr;
       });
 
-      // 연속 3프레임 이상 위협 궤적이 유지될 때만 경보 발령
-      if (threatCount >= 3) {
-        triggerValidatedAlert(dangerCol, statusStr, "$zoneStr 객체 근접", ttsCommand);
-      } else if (threatCount == 0) {
+      // 연속 3프레임 이상 차로를 막고 있는 실위험체만 경보
+      if (confirmedThreatFrames >= 3) {
+        triggerCorridorAlert(dangerColor, statusStr, "$zoneStr 장애물", ttsText);
+      } else if (confirmedThreatFrames == 0) {
         resetSafeState();
       }
 
     } catch (e) {
-      print("Tracking Error: $e");
+      print("Corridor Processing Error: $e");
     } finally {
       isProcessing = false;
     }
   }
 
-  void triggerValidatedAlert(Color color, String status, String msg, String speechText) {
+  void triggerCorridorAlert(Color color, String status, String msg, String speechText) {
     if (!mounted) return;
 
     setState(() {
@@ -243,8 +246,8 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
     if (!mounted) return;
     setState(() {
       boxColor = Colors.greenAccent;
-      driveStatus = "객체 궤적 추론 관제 중";
-      alertMessage = "전방 및 사각지대 안전";
+      driveStatus = "차로 궤적 관제 중";
+      alertMessage = "차로 및 사각지대 안전 확보";
       targetZone = "안전";
     });
   }
@@ -271,20 +274,33 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. 카메라 프리뷰
+          // 1. 카메라 뷰
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 2. 실시간 감지된 객체의 바운딩 박스 시각화 오버레이
-          if (activeBoundingBox != null)
+          // 2. 가상 주행 차로 가이드라인 (중앙 30%~70% 주행로 영역 시각화)
+          Align(
+            alignment: const Alignment(0, 0.35),
+            child: Container(
+              width: size.width * 0.45,
+              height: size.height * 0.50,
+              decoration: BoxDecoration(
+                border: Border.all(color: boxColor.withOpacity(0.5), width: 1.5),
+                color: boxColor.withOpacity(0.04),
+              ),
+            ),
+          ),
+
+          // 3. 차로 내 감지된 위협 객체 바운딩 박스
+          if (activeCorridorThreatBox != null)
             Positioned(
-              left: activeBoundingBox!.left * (size.width / (controller!.value.previewSize?.height ?? 1)),
-              top: activeBoundingBox!.top * (size.height / (controller!.value.previewSize?.width ?? 1)),
-              width: activeBoundingBox!.width * (size.width / (controller!.value.previewSize?.height ?? 1)),
-              height: activeBoundingBox!.height * (size.height / (controller!.value.previewSize?.width ?? 1)),
+              left: activeCorridorThreatBox!.left * (size.width / (controller!.value.previewSize?.height ?? 1)),
+              top: activeCorridorThreatBox!.top * (size.height / (controller!.value.previewSize?.width ?? 1)),
+              width: activeCorridorThreatBox!.width * (size.width / (controller!.value.previewSize?.height ?? 1)),
+              height: activeCorridorThreatBox!.height * (size.height / (controller!.value.previewSize?.width ?? 1)),
               child: Container(
                 decoration: BoxDecoration(
                   border: Border.all(color: boxColor, width: 3.5),
@@ -293,7 +309,7 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
               ),
             ),
 
-          // 3. 상단 상태바
+          // 4. 상단 상태바
           Positioned(
             top: 40,
             left: 15,
@@ -321,7 +337,7 @@ class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
             ),
           ),
 
-          // 4. 하단 제어 버튼
+          // 5. 하단 제어 버튼
           Positioned(
             bottom: 30,
             left: 20,
