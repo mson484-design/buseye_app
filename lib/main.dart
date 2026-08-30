@@ -14,36 +14,40 @@ Future<void> main() async {
     print('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: VisionSafetyScreen(),
+    home: BoundingBoxTrackingScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class VisionSafetyScreen extends StatefulWidget {
-  const VisionSafetyScreen({Key? key}) : super(key: key);
+class BoundingBoxTrackingScreen extends StatefulWidget {
+  const BoundingBoxTrackingScreen({Key? key}) : super(key: key);
 
   @override
-  State<VisionSafetyScreen> createState() => _VisionSafetyScreenState();
+  State<BoundingBoxTrackingScreen> createState() => _BoundingBoxTrackingScreenState();
 }
 
-class _VisionSafetyScreenState extends State<VisionSafetyScreen> {
+class _BoundingBoxTrackingScreenState extends State<BoundingBoxTrackingScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
   bool isProcessing = false;
 
-  String driveStatus = "사각지대 및 궤적 관제 중";
+  String driveStatus = "객체 궤적 추론 관제 중";
   Color boxColor = Colors.greenAccent;
-  String alertMessage = "전방 및 측면 안전 확보";
-  String riskZone = "안전";
+  String alertMessage = "전방 및 사각지대 안전";
 
-  // TTS 8초 잠금
+  // 객체 바운딩 박스 상태 정보
+  Rect? activeBoundingBox;
+  String targetZone = "안전";
+
+  // TTS 하드 락 (8초)
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
-  List<int>? previousFrameBytes;
+  List<int>? prevFrameBytes;
   int frameSkipCounter = 0;
+  int threatCount = 0;
 
   @override
   void initState() {
@@ -69,142 +73,165 @@ class _VisionSafetyScreenState extends State<VisionSafetyScreen> {
       controller!.initialize().then((_) {
         if (!mounted) return;
         setState(() {});
-        startRealtimeInference();
+        startTrackingStream();
       });
     }
   }
 
-  void startRealtimeInference() {
+  void startTrackingStream() {
     controller?.startImageStream((CameraImage image) {
       if (!isRunning || isProcessing) return;
 
       frameSkipCounter++;
-      if (frameSkipCounter % 3 != 0) return; // 10 FPS 수준 유지
+      if (frameSkipCounter % 3 != 0) return; // 10 FPS
 
       isProcessing = true;
-      inferCollisionThreats(image);
+      computeObjectBoundingBoxAndTrajectory(image);
     });
   }
 
-  // [핵심 추론 엔진: 모든 움직이는 물체의 궤적 및 사각지대 분석]
-  void inferCollisionThreats(CameraImage image) {
+  // [핵심] 식별된 객체의 바운딩 박스 추출 및 궤적(크기 팽창 및 위치) 연산
+  void computeObjectBoundingBoxAndTrajectory(CameraImage image) {
     try {
       final plane = image.planes[0];
       final bytes = plane.bytes;
       final width = image.width;
       final height = image.height;
 
-      // 3개 위험 구역 분할 샘플링
-      // 1. 좌측 사각지대 (회전/끼어들기)
-      // 2. 우측 사각지대 (회전/보행자/오토바이)
-      // 3. 전방 하단 사각지대 (범퍼 근접/주취자/지면 장애물)
-      int leftSideMotion = 0;
-      int rightSideMotion = 0;
-      int bottomBlindMotion = 0;
-      int centerFrontMotion = 0;
+      int minX = width, maxX = 0;
+      int minY = height, maxY = 0;
+      int motionPixelCount = 0;
 
       List<int> currentSamples = [];
-      int sampleIndex = 0;
+      int sampleIdx = 0;
 
-      // 샘플 그리드 스캔 (화면 전체의 위험 궤적 영역)
-      for (int y = (height * 0.35).toInt(); y < (height * 0.90).toInt(); y += 14) {
-        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 14) {
+      // 전방 및 사각지대 영역 스캔 (하늘 제외, 세로 35% ~ 90%)
+      int startY = (height * 0.35).toInt();
+      int endY = (height * 0.90).toInt();
+      int startX = (width * 0.10).toInt();
+      int endX = (width * 0.90).toInt();
+
+      for (int y = startY; y < endY; y += 12) {
+        for (int x = startX; x < endX; x += 12) {
           int byteIdx = y * plane.bytesPerRow + x;
           if (byteIdx < bytes.length) {
             int curVal = bytes[byteIdx];
             currentSamples.add(curVal);
 
-            if (previousFrameBytes != null && sampleIndex < previousFrameBytes!.length) {
-              int diff = (curVal - previousFrameBytes![sampleIndex]).abs();
+            if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
+              int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
               
-              // 뚜렷한 움직임을 보이는 객체만 추출 (임계값 50)
-              if (diff > 50) {
-                double relX = x / width;
-                double relY = y / height;
-
-                if (relY > 0.70) {
-                  // 차량 바로 앞 전방 하단 사각지대
-                  bottomBlindMotion++;
-                } else if (relX < 0.30) {
-                  // 좌측 궤적
-                  leftSideMotion++;
-                } else if (relX > 0.70) {
-                  // 우측 궤적
-                  rightSideMotion++;
-                } else {
-                  // 정면 주행 궤적
-                  centerFrontMotion++;
-                }
+              // 배경(정지물)을 제외하고 독립적으로 움직이는 객체 픽셀 추출 (임계값 55)
+              if (diff > 55) {
+                minX = min(minX, x);
+                maxX = max(maxX, x);
+                minY = min(minY, y);
+                maxY = max(maxY, y);
+                motionPixelCount++;
               }
             }
-            sampleIndex++;
+            sampleIdx++;
           }
         }
       }
 
-      previousFrameBytes = currentSamples;
+      prevFrameBytes = currentSamples;
 
-      // 충돌 위험 추론 및 단계 확정
-      // A. 전방 하단 사각지대 위험 (최고 위험: 즉시 제동)
-      if (bottomBlindMotion >= 3) {
-        triggerWarning(
-          Colors.redAccent,
-          "전방 사각지대 객체 감지! 즉시 제동",
-          "전방 하단 사각지대",
-          "사각지대 위험 즉시 제동",
-        );
+      // 노이즈(TV 플리커, 미세 흔들림) 필터링: 최소 크기 이상의 응집된 객체만 바운딩 박스로 인정
+      if (motionPixelCount < 12 || minX >= maxX || minY >= maxY) {
+        setState(() {
+          activeBoundingBox = null;
+          targetZone = "안전";
+          if (driveStatus != "객체 궤적 추론 관제 중") {
+            driveStatus = "객체 궤적 추론 관제 중";
+            boxColor = Colors.greenAccent;
+            alertMessage = "전방 및 사각지대 안전";
+          }
+        });
+        isProcessing = false;
+        return;
       }
-      // B. 측면(좌/우) 궤적 파고듦 위험
-      else if (leftSideMotion >= 3 || rightSideMotion >= 3) {
-        String side = leftSideMotion >= 3 ? "좌측" : "우측";
-        triggerWarning(
-          Colors.orangeAccent,
-          "$side 사각지대 물체 접근 중",
-          "$side 충돌 궤적",
-          "측면 사각지대 위험 감속",
-        );
+
+      // 1. 객체의 실시간 바운딩 박스 확정
+      Rect detectedBox = Rect.fromLTRB(
+        minX.toDouble(),
+        minY.toDouble(),
+        maxX.toDouble(),
+        maxY.toDouble(),
+      );
+
+      // 2. 박스의 위치(Zone) 및 궤적 판단
+      double boxCenterX = detectedBox.center.dx / width;
+      double boxBottomY = detectedBox.bottom / height;
+      double boxArea = detectedBox.width * detectedBox.height;
+      double screenArea = (width * height).toDouble();
+      double areaRatio = boxArea / screenArea;
+
+      String zoneStr = "전방";
+      Color dangerCol = Colors.orangeAccent;
+      String ttsCommand = "전방 위험 감속하십시오";
+      String statusStr = "전방 객체 접근";
+
+      // 판정 기준 1: 전방 하단 사각지대 (범퍼 앞 0~2m 지면 구역, 하단 75% 이상)
+      if (boxBottomY > 0.75 && areaRatio > 0.03) {
+        zoneStr = "전방 하단 사각지대";
+        dangerCol = Colors.redAccent;
+        ttsCommand = "사각지대 위험 즉시 제동";
+        statusStr = "사각지대 위험 감지";
+        threatCount += 2;
       }
-      // C. 정면 충돌 궤적 위험
-      else if (centerFrontMotion >= 4) {
-        triggerWarning(
-          Colors.redAccent,
-          "전방 급접근 객체! 브레이크",
-          "정면 충돌 궤적",
-          "위험 전방 주시 브레이크",
-        );
-      } else if (centerFrontMotion >= 2) {
-        triggerWarning(
-          Colors.orangeAccent,
-          "전방 물체 접근 중 감속",
-          "정면 서행 접근",
-          "전방 위험 감속하십시오",
-        );
+      // 판정 기준 2: 측면 회전 궤적 사각지대 (좌우 모서리 파고듦)
+      else if (boxCenterX < 0.28 || boxCenterX > 0.72) {
+        zoneStr = boxCenterX < 0.28 ? "좌측 사각지대" : "우측 사각지대";
+        dangerCol = Colors.orangeAccent;
+        ttsCommand = "측면 사각지대 위험 감속";
+        statusStr = "측면 궤적 객체 침입";
+        threatCount += 1;
+      }
+      // 판정 기준 3: 정면 충돌 궤적 (면적이 급격히 커지며 중앙으로 돌진)
+      else if (areaRatio > 0.08) {
+        zoneStr = "정면 충돌 궤적";
+        dangerCol = Colors.redAccent;
+        ttsCommand = "위험 전방 주시 브레이크";
+        statusStr = "전방 급접근 충돌 위험";
+        threatCount += 2;
       } else {
+        threatCount = max(0, threatCount - 1);
+      }
+
+      setState(() {
+        activeBoundingBox = detectedBox;
+        targetZone = zoneStr;
+      });
+
+      // 연속 3프레임 이상 위협 궤적이 유지될 때만 경보 발령
+      if (threatCount >= 3) {
+        triggerValidatedAlert(dangerCol, statusStr, "$zoneStr 객체 근접", ttsCommand);
+      } else if (threatCount == 0) {
         resetSafeState();
       }
 
     } catch (e) {
-      print("Inference Error: $e");
+      print("Tracking Error: $e");
     } finally {
       isProcessing = false;
     }
   }
 
-  void triggerWarning(Color color, String msg, String zone, String ttsText) {
+  void triggerValidatedAlert(Color color, String status, String msg, String speechText) {
     if (!mounted) return;
 
     setState(() {
       boxColor = color;
+      driveStatus = status;
       alertMessage = msg;
-      riskZone = zone;
-      driveStatus = color == Colors.redAccent ? "긴급 충돌 경고" : "주의 감속 경고";
     });
 
     final now = DateTime.now();
     if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
       isSpeechLocked = true;
       lastSpokenTime = now;
-      flutterTts.speak(ttsText);
+      flutterTts.speak(speechText);
 
       Timer(const Duration(seconds: 8), () {
         isSpeechLocked = false;
@@ -213,12 +240,12 @@ class _VisionSafetyScreenState extends State<VisionSafetyScreen> {
   }
 
   void resetSafeState() {
-    if (!mounted || driveStatus == "사각지대 및 궤적 관제 중") return;
+    if (!mounted) return;
     setState(() {
       boxColor = Colors.greenAccent;
-      driveStatus = "사각지대 및 궤적 관제 중";
-      alertMessage = "전방 및 측면 안전 확보";
-      riskZone = "안전";
+      driveStatus = "객체 궤적 추론 관제 중";
+      alertMessage = "전방 및 사각지대 안전";
+      targetZone = "안전";
     });
   }
 
@@ -244,14 +271,29 @@ class _VisionSafetyScreenState extends State<VisionSafetyScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. 카메라 광각 뷰
+          // 1. 카메라 프리뷰
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 2. 상단 상태바
+          // 2. 실시간 감지된 객체의 바운딩 박스 시각화 오버레이
+          if (activeBoundingBox != null)
+            Positioned(
+              left: activeBoundingBox!.left * (size.width / (controller!.value.previewSize?.height ?? 1)),
+              top: activeBoundingBox!.top * (size.height / (controller!.value.previewSize?.width ?? 1)),
+              width: activeBoundingBox!.width * (size.width / (controller!.value.previewSize?.height ?? 1)),
+              height: activeBoundingBox!.height * (size.height / (controller!.value.previewSize?.width ?? 1)),
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: boxColor, width: 3.5),
+                  color: boxColor.withOpacity(0.2),
+                ),
+              ),
+            ),
+
+          // 3. 상단 상태바
           Positioned(
             top: 40,
             left: 15,
@@ -267,45 +309,12 @@ class _VisionSafetyScreenState extends State<VisionSafetyScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    "상태: $driveStatus",
-                    style: TextStyle(color: boxColor, fontSize: 16, fontWeight: FontWeight.bold),
+                    driveStatus,
+                    style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
                   ),
                   Text(
-                    "구역: $riskZone",
+                    "구역: $targetZone",
                     style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // 3. 광각 전방위 사각지대 관제 박스
-          Align(
-            alignment: const Alignment(0, 0.40),
-            child: Container(
-              width: size.width * 0.90,
-              height: size.height * 0.45,
-              decoration: BoxDecoration(
-                border: Border.all(color: boxColor, width: 3.0),
-                borderRadius: BorderRadius.circular(12),
-                color: boxColor.withOpacity(0.06),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: boxColor,
-                      borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(8),
-                        bottomRight: Radius.circular(8),
-                      ),
-                    ),
-                    child: Text(
-                      alertMessage,
-                      style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 14),
-                    ),
                   ),
                 ],
               ),
