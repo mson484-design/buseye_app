@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -32,20 +33,18 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
   bool isRunning = true;
   bool isProcessing = false;
 
-  String driveStatus = "광각 전방 관제 중";
+  String driveStatus = "정상 주행 중";
   Color boxColor = Colors.greenAccent;
   double estimatedDistance = 15.0;
   String alertMessage = "전방 안전 확보";
+  String detectedObject = "없음"; // 사람, 차량, 없음
 
-  // TTS 반복 완전 차단용 락 (8초 락)
+  // TTS 잠금 (8초 락)
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 20));
 
-  List<int>? previousSampleBuffer;
+  List<int>? previousFrameBytes;
   int frameSkipCounter = 0;
-  
-  // 상태 변화 필터링 (히스테리시스 버퍼)
-  int dangerScore = 0;
 
   @override
   void initState() {
@@ -64,7 +63,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
     if (cameras.isNotEmpty) {
       controller = CameraController(
         cameras[0],
-        ResolutionPreset.medium,
+        ResolutionPreset.low, // 처리 속도 극대화를 위해 해상도 최적화
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -80,77 +79,110 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
     controller?.startImageStream((CameraImage image) {
       if (!isRunning || isProcessing) return;
 
-      // 4프레임마다 1회 연산
+      // 프레임 처리 속도 개선: 3프레임당 1회 연산 (약 10 FPS 유지)
       frameSkipCounter++;
-      if (frameSkipCounter % 4 != 0) return;
+      if (frameSkipCounter % 3 != 0) return;
 
       isProcessing = true;
-      processWideAngleFrame(image);
+      processObjectDetection(image);
     });
   }
 
-  void processWideAngleFrame(CameraImage image) {
+  // [핵심] 객체 감지 및 거리 계산 파이프라인
+  void processObjectDetection(CameraImage image) {
     try {
       final plane = image.planes[0];
       final bytes = plane.bytes;
       final width = image.width;
       final height = image.height;
 
-      // [넓게 보기 설정] 버스/승용차용 광각 ROI (가로 10% ~ 90%, 세로 45% ~ 85%)
-      int startX = (width * 0.10).toInt();
-      int endX = (width * 0.90).toInt();
-      int startY = (height * 0.45).toInt();
+      // 광각 관제 영역
+      int startX = (width * 0.15).toInt();
+      int endX = (width * 0.85).toInt();
+      int startY = (height * 0.35).toInt();
       int endY = (height * 0.85).toInt();
 
       List<int> currentSamples = [];
-      for (int y = startY; y < endY; y += 16) {
-        for (int x = startX; x < endX; x += 16) {
+      
+      // 움직이는 객체의 윤곽(바운딩 박스) 찾기
+      int minX = width, maxX = 0;
+      int minY = height, maxY = 0;
+      int motionPixelCount = 0;
+
+      for (int y = startY; y < endY; y += 12) {
+        for (int x = startX; x < endX; x += 12) {
           int index = y * plane.bytesPerRow + x;
           if (index < bytes.length) {
-            currentSamples.add(bytes[index]);
+            int currentPixel = bytes[index];
+            currentSamples.add(currentPixel);
+
+            if (previousFrameBytes != null) {
+              int prevPixel = previousFrameBytes![currentSamples.length - 1];
+              if ((currentPixel - prevPixel).abs() > 45) { // 뚜렷한 물체 움직임만 추출
+                minX = min(minX, x);
+                maxX = max(maxX, x);
+                minY = min(minY, y);
+                maxY = max(maxY, y);
+                motionPixelCount++;
+              }
+            }
           }
         }
       }
 
-      if (previousSampleBuffer == null || previousSampleBuffer!.length != currentSamples.length) {
-        previousSampleBuffer = currentSamples;
+      previousFrameBytes = currentSamples;
+
+      // 노이즈/TV 플리커 필터링: 화면 전체가 번쩍이는 건 무시, 너무 작은 점도 무시
+      int totalSampledArea = ((endX - startX) ~/ 12) * ((endY - startY) ~/ 12);
+      if (motionPixelCount < 5 || motionPixelCount > totalSampledArea * 0.7) {
+        setSafeState();
         isProcessing = false;
         return;
       }
 
-      int diffSum = 0;
-      for (int i = 0; i < currentSamples.length; i++) {
-        diffSum += (currentSamples[i] - previousSampleBuffer![i]).abs();
-      }
-      int avgMotionDiff = diffSum ~/ currentSamples.length;
-      previousSampleBuffer = currentSamples;
-
-      // 점수 기반 모션 필터링
-      if (avgMotionDiff > 45) {
-        dangerScore = (dangerScore + 2).clamp(0, 10);
-      } else if (avgMotionDiff > 25) {
-        dangerScore = (dangerScore + 1).clamp(0, 10);
-      } else {
-        dangerScore = (dangerScore - 1).clamp(0, 10);
+      // 객체 크기 (가로/세로 비율 계산)
+      int objWidth = maxX - minX;
+      int objHeight = maxY - minY;
+      
+      String objType = "차량"; // 기본값
+      // 높이가 너비보다 1.2배 이상 길면 사람으로 간주 (형태 감지)
+      if (objHeight > objWidth * 1.2) {
+        objType = "사람";
       }
 
-      // 점수에 따른 거리 및 상태 분류
-      if (dangerScore >= 6) {
-        triggerStatusUpdate(3.5, "위험 추돌 경고", Colors.redAccent, "전방 급접근! 브레이크", "위험 전방 주시 브레이크");
-      } else if (dangerScore >= 3) {
-        triggerStatusUpdate(6.5, "서행 접근 주의", Colors.orangeAccent, "앞차 접근 중 | 감속", "앞차 주의");
-      } else {
-        triggerStatusUpdate(15.0, "정상 주행 중", Colors.greenAccent, "전방 안전 확보", "");
-      }
+      // 거리 계산 (화면에서 객체가 차지하는 세로 비율을 거리에 반비례 적용)
+      double screenRatio = objHeight / (height * 0.5);
+      double calcDistance = (5.0 / screenRatio).clamp(1.5, 15.0);
+
+      evaluateDangerLevel(objType, calcDistance);
 
     } catch (e) {
-      print("Wide vision error: $e");
+      print("Vision Pipeline Error: $e");
     } finally {
       isProcessing = false;
     }
   }
 
-  void triggerStatusUpdate(double dist, String status, Color color, String msg, String speechText) {
+  // [위험 단계 세분화 및 맞춤 TTS 경고]
+  void evaluateDangerLevel(String objType, double dist) {
+    if (dist <= 3.5) {
+      // 1단계: 초근접 위험 (가장 높음)
+      triggerAlert(dist, "위험 추돌 경고 ($objType)", Colors.redAccent, "급접근! 브레이크", "위험 전방 주시 브레이크", objType);
+    } else if (dist <= 6.5) {
+      // 2단계: 사람 접근 감속
+      if (objType == "사람") {
+        triggerAlert(dist, "보행자 주의", Colors.orangeAccent, "사람 접근 감속", "사람 접근 감속하십시오", objType);
+      } 
+      // 3단계: 차량/기타 위험 감속
+      else {
+        triggerAlert(dist, "차량 서행 접근", Colors.orangeAccent, "전방 위험 감속", "전방 위험 감속하십시오", objType);
+      }
+    } else {
+      setSafeState();
+    }
+  }
+
+  void triggerAlert(double dist, String status, Color color, String msg, String speechText, String obj) {
     if (!mounted) return;
 
     setState(() {
@@ -158,11 +190,11 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
       driveStatus = status;
       boxColor = color;
       alertMessage = msg;
+      detectedObject = obj;
     });
 
-    // [강력한 8초 락] 말한 직후 8초 동안은 어떤 경고 멘트도 중복 출력 금지
     final now = DateTime.now();
-    if (speechText.isNotEmpty && !isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
+    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
@@ -171,6 +203,17 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
         isSpeechLocked = false;
       });
     }
+  }
+
+  void setSafeState() {
+    if (!mounted || driveStatus == "정상 주행 중") return;
+    setState(() {
+      estimatedDistance = 15.0;
+      driveStatus = "정상 주행 중";
+      boxColor = Colors.greenAccent;
+      alertMessage = "전방 안전 확보";
+      detectedObject = "없음";
+    });
   }
 
   @override
@@ -195,14 +238,14 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. 카메라 전체화면
+          // 1. 카메라
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 2. 상단 상태 알림창
+          // 2. 상단 상태바
           Positioned(
             top: 40,
             left: 15,
@@ -219,51 +262,43 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
                 children: [
                   Text(
                     "상태: $driveStatus",
-                    style: TextStyle(
-                      color: boxColor,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(color: boxColor, fontSize: 16, fontWeight: FontWeight.bold),
                   ),
-                  const Text(
-                    "광각 와이드 관제",
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
+                  Text(
+                    "객체: $detectedObject",
+                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
             ),
           ),
 
-          // 3. 광각 타겟팅 박스 (화면 가로 88%를 꽉 채워 양옆 차선과 보행자까지 감지)
+          // 3. 중앙 관제 박스
           Align(
-            alignment: const Alignment(0, 0.45),
+            alignment: const Alignment(0, 0.40),
             child: Container(
-              width: size.width * 0.88,
-              height: size.height * 0.38,
+              width: size.width * 0.85,
+              height: size.height * 0.40,
               decoration: BoxDecoration(
                 border: Border.all(color: boxColor, width: 3.0),
-                borderRadius: BorderRadius.circular(14),
-                color: boxColor.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(12),
+                color: boxColor.withOpacity(0.08),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
                       color: boxColor,
                       borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(10),
-                        bottomRight: Radius.circular(10),
+                        topLeft: Radius.circular(8),
+                        bottomRight: Radius.circular(8),
                       ),
                     ),
                     child: Text(
                       "$alertMessage | ${estimatedDistance.toStringAsFixed(1)}m",
-                      style: const TextStyle(
-                        color: Colors.black,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                      ),
+                      style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 14),
                     ),
                   ),
                 ],
@@ -271,7 +306,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
             ),
           ),
 
-          // 4. 하단 제어 버튼
+          // 4. 하단 버튼
           Positioned(
             bottom: 30,
             left: 20,
@@ -280,9 +315,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: isRunning ? Colors.redAccent : Colors.green,
                 padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
               onPressed: () {
                 setState(() {
@@ -295,11 +328,7 @@ class _BusEyeVisionScreenState extends State<BusEyeVisionScreen> {
               },
               child: Text(
                 isRunning ? "■ 관제 일시 중지" : "▶ 관제 다시 시작",
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
               ),
             ),
           ),
