@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:path_provider/path_provider.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -36,12 +38,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   String driveStatus = "VES 안전 관제 중";
   Color boxColor = Colors.greenAccent;
   String alertMessage = "전방 및 차로 안전 확보";
-  String roadBriefing = "도로 상태: 정상 폭 주행로";
+  String roadBriefing = "도로 상태: 정상 주행로";
   String targetZone = "안전";
 
   Rect? threatBoundingBox;
+  double prevBoxArea = 0.0;
 
-  // TTS 8초 잠금
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
@@ -49,11 +51,24 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   int frameSkipCounter = 0;
   int confirmedThreatFrames = 0;
 
+  final List<String> _driveLogSession = [];
+  int eventSaveCount = 0;
+  String saveStatusMsg = "데이터 기록 대기 중";
+
   @override
   void initState() {
     super.initState();
     initTTS();
     initCamera();
+    _startNewDriveSession();
+  }
+
+  void _startNewDriveSession() {
+    final now = DateTime.now();
+    _driveLogSession.clear();
+    _driveLogSession.add("=== VES (Vehicle Eye System) 주행 관제 세션 ===");
+    _driveLogSession.add("시작 시각: ${now.toIso8601String()}");
+    _driveLogSession.add("-----------------------------------------------");
   }
 
   void initTTS() async {
@@ -83,7 +98,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       if (!isRunning || isProcessing) return;
 
       frameSkipCounter++;
-      if (frameSkipCounter % 3 != 0) return; // 10 FPS 연산
+      if (frameSkipCounter % 3 != 0) return;
 
       isProcessing = true;
       processVESInference(image);
@@ -97,10 +112,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final width = image.width;
       final height = image.height;
 
-      int corridorLeft = (width * 0.30).toInt();
-      int corridorRight = (width * 0.70).toInt();
-      int scanTop = (height * 0.35).toInt();
-      int scanBottom = (height * 0.90).toInt();
+      int corridorLeft = (width * 0.32).toInt();
+      int corridorRight = (width * 0.68).toInt();
+      
+      // [와이퍼/보닛 필터링] 화면 최하단(82% 이상)과 최상단(40% 이하)은 스캔에서 배제
+      int scanTop = (height * 0.40).toInt();
+      int scanBottom = (height * 0.82).toInt();
 
       int minX = width, maxX = 0;
       int minY = height, maxY = 0;
@@ -108,13 +125,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       int leftDensity = 0;
       int rightDensity = 0;
       int corridorMotionPixels = 0;
-      int bottomBlindMotion = 0;
 
       List<int> currentSamples = [];
       int sampleIdx = 0;
 
-      for (int y = scanTop; y < scanBottom; y += 12) {
-        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 12) {
+      for (int y = scanTop; y < scanBottom; y += 14) {
+        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 14) {
           int byteIdx = y * plane.bytesPerRow + x;
           if (byteIdx < bytes.length) {
             int curVal = bytes[byteIdx];
@@ -123,12 +139,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
               int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
 
-              if (diff > 55) {
+              // 차량 주행 진동 노이즈 무시 (임계값 상향 65)
+              if (diff > 65) {
                 double relX = x / width;
-                double relY = y / height;
 
-                if (relX < 0.28) leftDensity++;
-                if (relX > 0.72) rightDensity++;
+                if (relX < 0.30) leftDensity++;
+                if (relX > 0.70) rightDensity++;
 
                 if (x >= corridorLeft && x <= corridorRight) {
                   corridorMotionPixels++;
@@ -136,8 +152,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   maxX = max(maxX, x);
                   minY = min(minY, y);
                   maxY = max(maxY, y);
-
-                  if (relY > 0.76) bottomBlindMotion++;
                 }
               }
             }
@@ -148,18 +162,18 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
       prevFrameBytes = currentSamples;
 
-      // 1. 도로 환경 능동 브리핑 판단
+      // 1. 도로 환경 브리핑
       String currentRoadStatus = "도로 상태: 정상 주행로";
-      if (leftDensity > 18 && rightDensity > 18) {
+      if (leftDensity > 22 && rightDensity > 22) {
         currentRoadStatus = "도로 상태: 도로폭 협소 구간";
-      } else if (rightDensity > 22) {
+      } else if (rightDensity > 26) {
         currentRoadStatus = "도로 상태: 우측 수풀/벽체 밀착 주의";
-      } else if (leftDensity > 22) {
+      } else if (leftDensity > 26) {
         currentRoadStatus = "도로 상태: 좌측 장애물 밀착 주의";
       }
 
-      // 2. 충돌 궤적 및 사각지대 위험 판정
-      if (corridorMotionPixels < 12 || minX >= maxX || minY >= maxY) {
+      // 2. 움직임 픽셀 부족 시 안전 복귀
+      if (corridorMotionPixels < 20 || minX >= maxX || minY >= maxY) {
         setState(() {
           threatBoundingBox = null;
           roadBriefing = currentRoadStatus;
@@ -171,6 +185,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           }
         });
         confirmedThreatFrames = 0;
+        prevBoxArea = 0.0;
         isProcessing = false;
         return;
       }
@@ -182,33 +197,39 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         maxY.toDouble(),
       );
 
-      double boxBottomY = threatBox.bottom / height;
+      double boxBottomRatio = threatBox.bottom / height;
       double boxAreaRatio = (threatBox.width * threatBox.height) / (width * height);
+      
+      // [핵심] 급접근율(확장 속도) 계산: 이전 프레임 대비 박스 크기가 35% 이상 급증할 때만 충돌 위협으로 간주
+      bool isApproachingRapidly = (prevBoxArea > 0) && (boxAreaRatio > prevBoxArea * 1.35);
+      prevBoxArea = boxAreaRatio;
 
       String zoneStr = "차로 전방";
       Color dangerColor = Colors.orangeAccent;
-      String ttsCommand = "전방 위험 감속하십시오";
-      String statusStr = "전방 객체 접근";
+      String ttsCommand = "전방 주의";
+      String statusStr = "전방 흐름 유지";
 
-      if (bottomBlindMotion >= 3 && boxAreaRatio > 0.03) {
+      // 3. 상황별 엄격 판정
+      if (boxBottomRatio > 0.75 && boxAreaRatio > 0.06 && isApproachingRapidly) {
         zoneStr = "전방 하단 사각지대";
         dangerColor = Colors.redAccent;
         ttsCommand = "사각지대 위험 즉시 제동";
-        statusStr = "사각지대 주취자/장애물 감지";
+        statusStr = "사각지대 급접근 장애물";
         confirmedThreatFrames += 2;
-      } else if (boxAreaRatio > 0.12) {
+      } else if (boxAreaRatio > 0.18 && isApproachingRapidly) {
         zoneStr = "정면 충돌 궤적";
         dangerColor = Colors.redAccent;
         ttsCommand = "위험 전방 주시 브레이크";
         statusStr = "전방 급접근 충돌 위험";
         confirmedThreatFrames += 2;
-      } else if (boxAreaRatio > 0.04) {
-        zoneStr = "차로 내 전방 객체";
+      } else if (boxAreaRatio > 0.08 && isApproachingRapidly) {
+        zoneStr = "차로 내 접근 객체";
         dangerColor = Colors.orangeAccent;
-        ttsCommand = "전방 위험 감속하십시오";
+        ttsCommand = "전방 간격 확인 감속";
         statusStr = "전방 감속 주의";
         confirmedThreatFrames += 1;
       } else {
+        // 앞차와 일정 간격으로 안정적 주행 중일 때는 경보 누적 감소
         confirmedThreatFrames = max(0, confirmedThreatFrames - 1);
       }
 
@@ -218,8 +239,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         roadBriefing = currentRoadStatus;
       });
 
-      if (confirmedThreatFrames >= 3) {
-        triggerVESAlert(dangerColor, statusStr, "$zoneStr 객체 근접", ttsCommand);
+      if (confirmedThreatFrames >= 4) { // 4프레임(약 0.4초) 이상 지속 접근 시에만 알림
+        triggerVESAlert(dangerColor, statusStr, "$zoneStr 객체 근접", ttsCommand, currentRoadStatus);
       } else if (confirmedThreatFrames == 0) {
         resetVESState(currentRoadStatus);
       }
@@ -231,7 +252,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void triggerVESAlert(Color color, String status, String msg, String speechText) {
+  void triggerVESAlert(Color color, String status, String msg, String speechText, String roadStatus) {
     if (!mounted) return;
 
     setState(() {
@@ -245,6 +266,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
+
+      eventSaveCount++;
+      final logEntry = "[이벤트 #$eventSaveCount] ${now.toIso8601String()} | 구역: $targetZone | 상태: $status | $roadStatus | 음성: $speechText";
+      _driveLogSession.add(logEntry);
 
       Timer(const Duration(seconds: 8), () {
         isSpeechLocked = false;
@@ -261,6 +286,46 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       targetZone = "안전";
       roadBriefing = roadStatus;
     });
+  }
+
+  Future<void> _saveSessionDataToMybox() async {
+    try {
+      Directory? baseDir;
+      if (Platform.isAndroid) {
+        baseDir = Directory('/storage/emulated/0/DCIM/VES_Records');
+      } else {
+        baseDir = await getApplicationDocumentsDirectory();
+      }
+
+      if (!await baseDir.exists()) {
+        await baseDir.create(recursive: true);
+      }
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File('${baseDir.path}/VES_DriveReport_$timestamp.txt');
+
+      _driveLogSession.add("-----------------------------------------------");
+      _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
+      _driveLogSession.add("총 감지 이벤트 수: $eventSaveCount건");
+
+      await file.writeAsString(_driveLogSession.join('\n'));
+
+      setState(() {
+        saveStatusMsg = "MYBOX 폴더 저장 완료";
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("주행 데이터가 DCIM/VES_Records에 저장되었습니다. (MYBOX 자동 동기화)"),
+            backgroundColor: Colors.teal,
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      print("Save error: $e");
+    }
   }
 
   @override
@@ -349,6 +414,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     roadBriefing,
                     style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
                   ),
+                  const SizedBox(height: 2),
+                  Text(
+                    "기록 상태: $saveStatusMsg",
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  ),
                 ],
               ),
             ),
@@ -364,18 +434,27 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
-              onPressed: () {
-                setState(() {
-                  isRunning = !isRunning;
-                  if (!isRunning) {
-                    driveStatus = "관제 일시 중지";
+              onPressed: () async {
+                if (isRunning) {
+                  await _saveSessionDataToMybox();
+                  setState(() {
+                    isRunning = false;
+                    driveStatus = "관제 종료 (MYBOX 저장됨)";
                     boxColor = Colors.grey;
-                  }
-                });
+                  });
+                } else {
+                  _startNewDriveSession();
+                  setState(() {
+                    isRunning = true;
+                    driveStatus = "VES 안전 관제 중";
+                    boxColor = Colors.greenAccent;
+                    saveStatusMsg = "새 세션 기록 중";
+                  });
+                }
               },
               child: Text(
-                isRunning ? "■ 관제 일시 중지" : "▶ 관제 다시 시작",
-                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
+                isRunning ? "■ 관제 종료 (MYBOX 자동 저장)" : "▶ 관제 다시 시작",
+                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
           ),
