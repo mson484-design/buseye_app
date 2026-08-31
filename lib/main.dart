@@ -4,7 +4,6 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:path_provider/path_provider.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -114,8 +113,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
       int corridorLeft = (width * 0.32).toInt();
       int corridorRight = (width * 0.68).toInt();
-      
-      // [와이퍼/보닛 필터링] 화면 최하단(82% 이상)과 최상단(40% 이하)은 스캔에서 배제
+
+      // [와이퍼 및 보닛 배제] 상단 40% 이하, 하단 82% 이상 제외
       int scanTop = (height * 0.40).toInt();
       int scanBottom = (height * 0.82).toInt();
 
@@ -139,7 +138,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
               int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
 
-              // 차량 주행 진동 노이즈 무시 (임계값 상향 65)
+              // 차량 진동 노이즈 차단 (임계값 65)
               if (diff > 65) {
                 double relX = x / width;
 
@@ -162,7 +161,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
       prevFrameBytes = currentSamples;
 
-      // 1. 도로 환경 브리핑
+      // 도로 환경 실시간 브리핑
       String currentRoadStatus = "도로 상태: 정상 주행로";
       if (leftDensity > 22 && rightDensity > 22) {
         currentRoadStatus = "도로 상태: 도로폭 협소 구간";
@@ -172,7 +171,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         currentRoadStatus = "도로 상태: 좌측 장애물 밀착 주의";
       }
 
-      // 2. 움직임 픽셀 부족 시 안전 복귀
+      // 안전 상태 복귀 판정
       if (corridorMotionPixels < 20 || minX >= maxX || minY >= maxY) {
         setState(() {
           threatBoundingBox = null;
@@ -199,8 +198,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
       double boxBottomRatio = threatBox.bottom / height;
       double boxAreaRatio = (threatBox.width * threatBox.height) / (width * height);
-      
-      // [핵심] 급접근율(확장 속도) 계산: 이전 프레임 대비 박스 크기가 35% 이상 급증할 때만 충돌 위협으로 간주
+
+      // 박스 크기 확장률 (급접근 판정)
       bool isApproachingRapidly = (prevBoxArea > 0) && (boxAreaRatio > prevBoxArea * 1.35);
       prevBoxArea = boxAreaRatio;
 
@@ -209,7 +208,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       String ttsCommand = "전방 주의";
       String statusStr = "전방 흐름 유지";
 
-      // 3. 상황별 엄격 판정
       if (boxBottomRatio > 0.75 && boxAreaRatio > 0.06 && isApproachingRapidly) {
         zoneStr = "전방 하단 사각지대";
         dangerColor = Colors.redAccent;
@@ -229,7 +227,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         statusStr = "전방 감속 주의";
         confirmedThreatFrames += 1;
       } else {
-        // 앞차와 일정 간격으로 안정적 주행 중일 때는 경보 누적 감소
         confirmedThreatFrames = max(0, confirmedThreatFrames - 1);
       }
 
@@ -239,7 +236,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         roadBriefing = currentRoadStatus;
       });
 
-      if (confirmedThreatFrames >= 4) { // 4프레임(약 0.4초) 이상 지속 접근 시에만 알림
+      if (confirmedThreatFrames >= 4) {
         triggerVESAlert(dangerColor, statusStr, "$zoneStr 객체 근접", ttsCommand, currentRoadStatus);
       } else if (confirmedThreatFrames == 0) {
         resetVESState(currentRoadStatus);
@@ -288,14 +285,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     });
   }
 
+  // MYBOX 폴더(/DCIM/VES_Records) 자동 저장
   Future<void> _saveSessionDataToMybox() async {
     try {
-      Directory? baseDir;
-      if (Platform.isAndroid) {
-        baseDir = Directory('/storage/emulated/0/DCIM/VES_Records');
-      } else {
-        baseDir = await getApplicationDocumentsDirectory();
-      }
+      final baseDir = Directory('/storage/emulated/0/DCIM/VES_Records');
 
       if (!await baseDir.exists()) {
         await baseDir.create(recursive: true);
@@ -317,7 +310,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("주행 데이터가 DCIM/VES_Records에 저장되었습니다. (MYBOX 자동 동기화)"),
+            content: Text("주행 데이터가 DCIM/VES_Records에 저장되었습니다. (MYBOX 자동 백업)"),
             backgroundColor: Colors.teal,
             duration: Duration(seconds: 4),
           ),
