@@ -14,39 +14,40 @@ Future<void> main() async {
     print('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: FullAngleSafetyScreen(),
+    home: VESSafetyScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class FullAngleSafetyScreen extends StatefulWidget {
-  const FullAngleSafetyScreen({Key? key}) : super(key: key);
+class VESSafetyScreen extends StatefulWidget {
+  const VESSafetyScreen({Key? key}) : super(key: key);
 
   @override
-  State<FullAngleSafetyScreen> createState() => _FullAngleSafetyScreenState();
+  State<VESSafetyScreen> createState() => _VESSafetyScreenState();
 }
 
-class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
+class _VESSafetyScreenState extends State<VESSafetyScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
   bool isProcessing = false;
 
-  String driveStatus = "전방위 사각지대 관제 중";
+  String driveStatus = "VES 안전 관제 중";
   Color boxColor = Colors.greenAccent;
-  String alertMessage = "전방 및 측면 안전 확보";
-  String activeZone = "안전";
+  String alertMessage = "전방 및 차로 안전 확보";
+  String roadBriefing = "도로 상태: 정상 폭 주행로";
+  String targetZone = "안전";
 
   Rect? threatBoundingBox;
 
-  // 멘트 중복 방지 8초 락
+  // TTS 8초 잠금
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
   List<int>? prevFrameBytes;
   int frameSkipCounter = 0;
-  int threatPersistence = 0;
+  int confirmedThreatFrames = 0;
 
   @override
   void initState() {
@@ -72,12 +73,12 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
       controller!.initialize().then((_) {
         if (!mounted) return;
         setState(() {});
-        startFullAngleStream();
+        startVESInference();
       });
     }
   }
 
-  void startFullAngleStream() {
+  void startVESInference() {
     controller?.startImageStream((CameraImage image) {
       if (!isRunning || isProcessing) return;
 
@@ -85,39 +86,35 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
       if (frameSkipCounter % 3 != 0) return; // 10 FPS 연산
 
       isProcessing = true;
-      inferMultiZoneCollision(image);
+      processVESInference(image);
     });
   }
 
-  // [핵심] 정면 + 좌/우 전측면 + 전방 하단 4대 영역 충돌 궤적 연산
-  void inferMultiZoneCollision(CameraImage image) {
+  void processVESInference(CameraImage image) {
     try {
       final plane = image.planes[0];
       final bytes = plane.bytes;
       final width = image.width;
       final height = image.height;
 
-      // 카메라 화각 전체 스캔 (하늘 제외: 가로 8%~92%, 세로 35%~90%)
-      int scanLeft = (width * 0.08).toInt();
-      int scanRight = (width * 0.92).toInt();
+      int corridorLeft = (width * 0.30).toInt();
+      int corridorRight = (width * 0.70).toInt();
       int scanTop = (height * 0.35).toInt();
       int scanBottom = (height * 0.90).toInt();
 
       int minX = width, maxX = 0;
       int minY = height, maxY = 0;
-      int motionCount = 0;
 
-      // 구역별 위협 픽셀 수집
-      int leftThreat = 0;
-      int rightThreat = 0;
-      int centerThreat = 0;
-      int bottomThreat = 0;
+      int leftDensity = 0;
+      int rightDensity = 0;
+      int corridorMotionPixels = 0;
+      int bottomBlindMotion = 0;
 
       List<int> currentSamples = [];
       int sampleIdx = 0;
 
       for (int y = scanTop; y < scanBottom; y += 12) {
-        for (int x = scanLeft; x < scanRight; x += 12) {
+        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 12) {
           int byteIdx = y * plane.bytesPerRow + x;
           if (byteIdx < bytes.length) {
             int curVal = bytes[byteIdx];
@@ -126,25 +123,21 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
             if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
               int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
 
-              // 유효한 접근 모션만 감지 (임계값 55)
               if (diff > 55) {
-                minX = min(minX, x);
-                maxX = max(maxX, x);
-                minY = min(minY, y);
-                maxY = max(maxY, y);
-                motionCount++;
-
                 double relX = x / width;
                 double relY = y / height;
 
-                if (relY > 0.76) {
-                  bottomThreat++; // 전방 하단 0~2m
-                } else if (relX < 0.30) {
-                  leftThreat++; // 좌측 측면 궤적
-                } else if (relX > 0.70) {
-                  rightThreat++; // 우측 측면 궤적
-                } else {
-                  centerThreat++; // 정면 차로 궤적
+                if (relX < 0.28) leftDensity++;
+                if (relX > 0.72) rightDensity++;
+
+                if (x >= corridorLeft && x <= corridorRight) {
+                  corridorMotionPixels++;
+                  minX = min(minX, x);
+                  maxX = max(maxX, x);
+                  minY = min(minY, y);
+                  maxY = max(maxY, y);
+
+                  if (relY > 0.76) bottomBlindMotion++;
                 }
               }
             }
@@ -155,89 +148,90 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
 
       prevFrameBytes = currentSamples;
 
-      // 노이즈 필터링 (최소 12픽셀 이상 응집된 물체만 판정)
-      if (motionCount < 12 || minX >= maxX || minY >= maxY) {
-        resetToSafe();
+      // 1. 도로 환경 능동 브리핑 판단
+      String currentRoadStatus = "도로 상태: 정상 주행로";
+      if (leftDensity > 18 && rightDensity > 18) {
+        currentRoadStatus = "도로 상태: 도로폭 협소 구간";
+      } else if (rightDensity > 22) {
+        currentRoadStatus = "도로 상태: 우측 수풀/벽체 밀착 주의";
+      } else if (leftDensity > 22) {
+        currentRoadStatus = "도로 상태: 좌측 장애물 밀착 주의";
+      }
+
+      // 2. 충돌 궤적 및 사각지대 위험 판정
+      if (corridorMotionPixels < 12 || minX >= maxX || minY >= maxY) {
+        setState(() {
+          threatBoundingBox = null;
+          roadBriefing = currentRoadStatus;
+          if (driveStatus != "VES 안전 관제 중") {
+            driveStatus = "VES 안전 관제 중";
+            boxColor = Colors.greenAccent;
+            alertMessage = "전방 및 차로 안전 확보";
+            targetZone = "안전";
+          }
+        });
+        confirmedThreatFrames = 0;
         isProcessing = false;
         return;
       }
 
-      Rect detectedBox = Rect.fromLTRB(
+      Rect threatBox = Rect.fromLTRB(
         minX.toDouble(),
         minY.toDouble(),
         maxX.toDouble(),
         maxY.toDouble(),
       );
 
-      double boxAreaRatio = (detectedBox.width * detectedBox.height) / (width * height);
+      double boxBottomY = threatBox.bottom / height;
+      double boxAreaRatio = (threatBox.width * threatBox.height) / (width * height);
 
-      String zoneName = "전방";
-      Color alertColor = Colors.orangeAccent;
-      String ttsMsg = "전방 위험 감속하십시오";
-      String statusMsg = "전방 객체 접근";
+      String zoneStr = "차로 전방";
+      Color dangerColor = Colors.orangeAccent;
+      String ttsCommand = "전방 위험 감속하십시오";
+      String statusStr = "전방 객체 접근";
 
-      // 1. 전방 하단 사각지대 (최우선: 지면 주취자/장애물)
-      if (bottomThreat >= 3 && boxAreaRatio > 0.03) {
-        zoneName = "전방 하단 사각지대";
-        alertColor = Colors.redAccent;
-        ttsMsg = "사각지대 위험 즉시 제동";
-        statusMsg = "사각지대 장애물 감지";
-        threatPersistence += 2;
-      }
-      // 2. 좌측 측면 사각지대 (회전/끼어들기 위험)
-      else if (leftThreat >= 4 && boxAreaRatio > 0.04) {
-        zoneName = "좌측 사각지대";
-        alertColor = Colors.orangeAccent;
-        ttsMsg = "좌측 사각지대 위험 감속";
-        statusMsg = "좌측 충돌 궤적 접근";
-        threatPersistence += 2;
-      }
-      // 3. 우측 측면 사각지대 (우회전/보행자 파고듦)
-      else if (rightThreat >= 4 && boxAreaRatio > 0.04) {
-        zoneName = "우측 사각지대";
-        alertColor = Colors.orangeAccent;
-        ttsMsg = "우측 사각지대 위험 감속";
-        statusMsg = "우측 충돌 궤적 접근";
-        threatPersistence += 2;
-      }
-      // 4. 정면 충돌 궤적 (급접근)
-      else if (centerThreat >= 4 && boxAreaRatio > 0.10) {
-        zoneName = "정면 충돌 궤적";
-        alertColor = Colors.redAccent;
-        ttsMsg = "위험 전방 주시 브레이크";
-        statusMsg = "전방 급접근 충돌 위험";
-        threatPersistence += 2;
-      }
-      // 5. 정면 단순 서행 접근
-      else if (centerThreat >= 3) {
-        zoneName = "정면 서행 궤적";
-        alertColor = Colors.orangeAccent;
-        ttsMsg = "전방 위험 감속하십시오";
-        statusMsg = "전방 감속 주의";
-        threatPersistence += 1;
+      if (bottomBlindMotion >= 3 && boxAreaRatio > 0.03) {
+        zoneStr = "전방 하단 사각지대";
+        dangerColor = Colors.redAccent;
+        ttsCommand = "사각지대 위험 즉시 제동";
+        statusStr = "사각지대 주취자/장애물 감지";
+        confirmedThreatFrames += 2;
+      } else if (boxAreaRatio > 0.12) {
+        zoneStr = "정면 충돌 궤적";
+        dangerColor = Colors.redAccent;
+        ttsCommand = "위험 전방 주시 브레이크";
+        statusStr = "전방 급접근 충돌 위험";
+        confirmedThreatFrames += 2;
+      } else if (boxAreaRatio > 0.04) {
+        zoneStr = "차로 내 전방 객체";
+        dangerColor = Colors.orangeAccent;
+        ttsCommand = "전방 위험 감속하십시오";
+        statusStr = "전방 감속 주의";
+        confirmedThreatFrames += 1;
       } else {
-        threatPersistence = max(0, threatPersistence - 1);
+        confirmedThreatFrames = max(0, confirmedThreatFrames - 1);
       }
 
       setState(() {
-        threatBoundingBox = detectedBox;
-        activeZone = zoneName;
+        threatBoundingBox = threatBox;
+        targetZone = zoneStr;
+        roadBriefing = currentRoadStatus;
       });
 
-      if (threatPersistence >= 3) {
-        executeAlert(alertColor, statusMsg, "$zoneName 위험", ttsMsg);
-      } else if (threatPersistence == 0) {
-        resetToSafe();
+      if (confirmedThreatFrames >= 3) {
+        triggerVESAlert(dangerColor, statusStr, "$zoneStr 객체 근접", ttsCommand);
+      } else if (confirmedThreatFrames == 0) {
+        resetVESState(currentRoadStatus);
       }
 
     } catch (e) {
-      print("Multi-zone error: $e");
+      print("VES Inference Error: $e");
     } finally {
       isProcessing = false;
     }
   }
 
-  void executeAlert(Color color, String status, String msg, String speechText) {
+  void triggerVESAlert(Color color, String status, String msg, String speechText) {
     if (!mounted) return;
 
     setState(() {
@@ -258,16 +252,15 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
     }
   }
 
-  void resetToSafe() {
+  void resetVESState(String roadStatus) {
     if (!mounted) return;
     setState(() {
-      threatBoundingBox = null;
       boxColor = Colors.greenAccent;
-      driveStatus = "전방위 사각지대 관제 중";
-      alertMessage = "전방 및 측면 안전 확보";
-      activeZone = "안전";
+      driveStatus = "VES 안전 관제 중";
+      alertMessage = "전방 및 차로 안전 확보";
+      targetZone = "안전";
+      roadBriefing = roadStatus;
     });
-    threatPersistence = 0;
   }
 
   @override
@@ -292,14 +285,24 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. 카메라 광각 뷰파인더
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 2. 감지된 위협 객체 바운딩 박스
+          Align(
+            alignment: const Alignment(0, 0.35),
+            child: Container(
+              width: size.width * 0.45,
+              height: size.height * 0.50,
+              decoration: BoxDecoration(
+                border: Border.all(color: boxColor.withOpacity(0.4), width: 1.5),
+                color: boxColor.withOpacity(0.03),
+              ),
+            ),
+          ),
+
           if (threatBoundingBox != null)
             Positioned(
               left: threatBoundingBox!.left * (size.width / (controller!.value.previewSize?.height ?? 1)),
@@ -309,40 +312,48 @@ class _FullAngleSafetyScreenState extends State<FullAngleSafetyScreen> {
               child: Container(
                 decoration: BoxDecoration(
                   border: Border.all(color: boxColor, width: 3.5),
-                  color: boxColor.withOpacity(0.25),
+                  color: boxColor.withOpacity(0.2),
                 ),
               ),
             ),
 
-          // 3. 상단 전방위 관제 상태창
           Positioned(
             top: 40,
             left: 15,
             right: 15,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               decoration: BoxDecoration(
                 color: Colors.black87,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: boxColor, width: 1.5),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    driveStatus,
-                    style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        driveStatus,
+                        style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        "구역: $targetZone",
+                        style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                    ],
                   ),
+                  const SizedBox(height: 4),
                   Text(
-                    "구역: $activeZone",
-                    style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    roadBriefing,
+                    style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
                   ),
                 ],
               ),
             ),
           ),
 
-          // 4. 하단 제어 버튼
           Positioned(
             bottom: 30,
             left: 20,
