@@ -114,7 +114,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       int corridorLeft = (width * 0.32).toInt();
       int corridorRight = (width * 0.68).toInt();
 
-      // [와이퍼 및 보닛 배제] 상단 40% 이하, 하단 82% 이상 제외
       int scanTop = (height * 0.40).toInt();
       int scanBottom = (height * 0.82).toInt();
 
@@ -138,7 +137,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
               int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
 
-              // 차량 진동 노이즈 차단 (임계값 65)
               if (diff > 65) {
                 double relX = x / width;
 
@@ -161,7 +159,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
       prevFrameBytes = currentSamples;
 
-      // 도로 환경 실시간 브리핑
       String currentRoadStatus = "도로 상태: 정상 주행로";
       if (leftDensity > 22 && rightDensity > 22) {
         currentRoadStatus = "도로 상태: 도로폭 협소 구간";
@@ -171,7 +168,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         currentRoadStatus = "도로 상태: 좌측 장애물 밀착 주의";
       }
 
-      // 안전 상태 복귀 판정
       if (corridorMotionPixels < 20 || minX >= maxX || minY >= maxY) {
         setState(() {
           threatBoundingBox = null;
@@ -199,7 +195,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       double boxBottomRatio = threatBox.bottom / height;
       double boxAreaRatio = (threatBox.width * threatBox.height) / (width * height);
 
-      // 박스 크기 확장률 (급접근 판정)
       bool isApproachingRapidly = (prevBoxArea > 0) && (boxAreaRatio > prevBoxArea * 1.35);
       prevBoxArea = boxAreaRatio;
 
@@ -285,39 +280,61 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     });
   }
 
-  // MYBOX 폴더(/DCIM/VES_Records) 자동 저장
+  // 최신 안드로이드 호환 다이렉트 저장 로직
   Future<void> _saveSessionDataToMybox() async {
     try {
-      final baseDir = Directory('/storage/emulated/0/DCIM/VES_Records');
+      // 1순위: 공용 DCIM/VES_Records 시도, 2순위: 앱 전용 안전 저장소
+      List<Directory> targetDirs = [
+        Directory('/storage/emulated/0/DCIM/VES_Records'),
+        Directory('/storage/emulated/0/Download/VES_Records'),
+        Directory('/storage/emulated/0/Android/data/com.buseye.safety/files/VES_Records'),
+      ];
 
-      if (!await baseDir.exists()) {
-        await baseDir.create(recursive: true);
+      File? savedFile;
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+
+      for (var dir in targetDirs) {
+        try {
+          if (!await dir.exists()) {
+            await dir.create(recursive: true);
+          }
+          final testFile = File('${dir.path}/VES_DriveReport_$timestamp.txt');
+          
+          List<String> finalLogs = List.from(_driveLogSession);
+          finalLogs.add("-----------------------------------------------");
+          finalLogs.add("종료 시각: ${DateTime.now().toIso8601String()}");
+          finalLogs.add("총 감지 이벤트 수: $eventSaveCount건");
+
+          await testFile.writeAsString(finalLogs.join('\n'));
+          savedFile = testFile;
+          break; // 정상 저장 시 루프 종료
+        } catch (_) {
+          continue;
+        }
       }
 
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final file = File('${baseDir.path}/VES_DriveReport_$timestamp.txt');
+      if (savedFile != null) {
+        setState(() {
+          saveStatusMsg = "저장 완료: ${savedFile!.path.split('/').last}";
+        });
 
-      _driveLogSession.add("-----------------------------------------------");
-      _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 감지 이벤트 수: $eventSaveCount건");
-
-      await file.writeAsString(_driveLogSession.join('\n'));
-
-      setState(() {
-        saveStatusMsg = "MYBOX 폴더 저장 완료";
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("주행 데이터가 DCIM/VES_Records에 저장되었습니다. (MYBOX 자동 백업)"),
-            backgroundColor: Colors.teal,
-            duration: Duration(seconds: 4),
-          ),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("주행 리포트 저장 완료!\n경로: ${savedFile.path}"),
+              backgroundColor: Colors.teal,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      } else {
+        throw "모든 저장소 경로 접근 불가";
       }
     } catch (e) {
       print("Save error: $e");
+      setState(() {
+        saveStatusMsg = "저장 오류: $e";
+      });
     }
   }
 
@@ -432,7 +449,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   await _saveSessionDataToMybox();
                   setState(() {
                     isRunning = false;
-                    driveStatus = "관제 종료 (MYBOX 저장됨)";
+                    driveStatus = "관제 종료 (저장 완료)";
                     boxColor = Colors.grey;
                   });
                 } else {
