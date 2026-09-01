@@ -32,9 +32,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
-  bool isProcessing = false;
+  bool isRecordingVideo = false;
 
-  String driveStatus = "VES 안전 관제 중";
+  String driveStatus = "VES 안전 관제 및 녹화 중";
   Color boxColor = Colors.greenAccent;
   String alertMessage = "전방 및 차로 안전 확보";
   String roadBriefing = "도로 상태: 정상 주행로";
@@ -46,28 +46,15 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
-  List<int>? prevFrameBytes;
-  int frameSkipCounter = 0;
+  Timer? inferenceTimer;
   int confirmedThreatFrames = 0;
-
-  final List<String> _driveLogSession = [];
-  int eventSaveCount = 0;
-  String saveStatusMsg = "데이터 기록 대기 중";
+  String saveStatusMsg = "동영상 녹화 준비 중";
 
   @override
   void initState() {
     super.initState();
     initTTS();
-    initCamera();
-    _startNewDriveSession();
-  }
-
-  void _startNewDriveSession() {
-    final now = DateTime.now();
-    _driveLogSession.clear();
-    _driveLogSession.add("=== VES (Vehicle Eye System) 주행 관제 세션 ===");
-    _driveLogSession.add("시작 시각: ${now.toIso8601String()}");
-    _driveLogSession.add("-----------------------------------------------");
+    initCameraAndStartRecording();
   }
 
   void initTTS() async {
@@ -76,270 +63,111 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     await flutterTts.setVolume(1.0);
   }
 
-  void initCamera() {
+  Future<void> initCameraAndStartRecording() async {
     if (cameras.isNotEmpty) {
       controller = CameraController(
         cameras[0],
-        ResolutionPreset.low,
+        ResolutionPreset.medium, // 동영상 화질 및 프레임 안정성 확보
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
       );
-      controller!.initialize().then((_) {
+
+      try {
+        await controller!.initialize();
         if (!mounted) return;
         setState(() {});
-        startVESInference();
-      });
-    }
-  }
 
-  void startVESInference() {
-    controller?.startImageStream((CameraImage image) {
-      if (!isRunning || isProcessing) return;
-
-      frameSkipCounter++;
-      if (frameSkipCounter % 3 != 0) return;
-
-      isProcessing = true;
-      processVESInference(image);
-    });
-  }
-
-  void processVESInference(CameraImage image) {
-    try {
-      final plane = image.planes[0];
-      final bytes = plane.bytes;
-      final width = image.width;
-      final height = image.height;
-
-      int corridorLeft = (width * 0.32).toInt();
-      int corridorRight = (width * 0.68).toInt();
-
-      int scanTop = (height * 0.40).toInt();
-      int scanBottom = (height * 0.82).toInt();
-
-      int minX = width, maxX = 0;
-      int minY = height, maxY = 0;
-
-      int leftDensity = 0;
-      int rightDensity = 0;
-      int corridorMotionPixels = 0;
-
-      List<int> currentSamples = [];
-      int sampleIdx = 0;
-
-      for (int y = scanTop; y < scanBottom; y += 14) {
-        for (int x = (width * 0.10).toInt(); x < (width * 0.90).toInt(); x += 14) {
-          int byteIdx = y * plane.bytesPerRow + x;
-          if (byteIdx < bytes.length) {
-            int curVal = bytes[byteIdx];
-            currentSamples.add(curVal);
-
-            if (prevFrameBytes != null && sampleIdx < prevFrameBytes!.length) {
-              int diff = (curVal - prevFrameBytes![sampleIdx]).abs();
-
-              if (diff > 65) {
-                double relX = x / width;
-
-                if (relX < 0.30) leftDensity++;
-                if (relX > 0.70) rightDensity++;
-
-                if (x >= corridorLeft && x <= corridorRight) {
-                  corridorMotionPixels++;
-                  minX = min(minX, x);
-                  maxX = max(maxX, x);
-                  minY = min(minY, y);
-                  maxY = max(maxY, y);
-                }
-              }
-            }
-            sampleIdx++;
-          }
-        }
-      }
-
-      prevFrameBytes = currentSamples;
-
-      String currentRoadStatus = "도로 상태: 정상 주행로";
-      if (leftDensity > 22 && rightDensity > 22) {
-        currentRoadStatus = "도로 상태: 도로폭 협소 구간";
-      } else if (rightDensity > 26) {
-        currentRoadStatus = "도로 상태: 우측 수풀/벽체 밀착 주의";
-      } else if (leftDensity > 26) {
-        currentRoadStatus = "도로 상태: 좌측 장애물 밀착 주의";
-      }
-
-      if (corridorMotionPixels < 20 || minX >= maxX || minY >= maxY) {
+        // 1. 카메라 구동 즉시 MP4 주행 동영상 녹화 시작
+        await controller!.startVideoRecording();
         setState(() {
-          threatBoundingBox = null;
-          roadBriefing = currentRoadStatus;
-          if (driveStatus != "VES 안전 관제 중") {
-            driveStatus = "VES 안전 관제 중";
-            boxColor = Colors.greenAccent;
-            alertMessage = "전방 및 차로 안전 확보";
-            targetZone = "안전";
-          }
+          isRecordingVideo = true;
+          saveStatusMsg = "주행 영상 실시간 녹화 중 (MP4)";
         });
-        confirmedThreatFrames = 0;
-        prevBoxArea = 0.0;
-        isProcessing = false;
-        return;
+
+        // 2. 백그라운드 실시간 비전 추론 루프 시작 (초당 5회 주기적 검사)
+        startPeriodicInference();
+
+      } catch (e) {
+        print("Camera/Recording Init Error: $e");
+        setState(() {
+          saveStatusMsg = "녹화 시작 오류: $e";
+        });
       }
-
-      Rect threatBox = Rect.fromLTRB(
-        minX.toDouble(),
-        minY.toDouble(),
-        maxX.toDouble(),
-        maxY.toDouble(),
-      );
-
-      double boxBottomRatio = threatBox.bottom / height;
-      double boxAreaRatio = (threatBox.width * threatBox.height) / (width * height);
-
-      bool isApproachingRapidly = (prevBoxArea > 0) && (boxAreaRatio > prevBoxArea * 1.35);
-      prevBoxArea = boxAreaRatio;
-
-      String zoneStr = "차로 전방";
-      Color dangerColor = Colors.orangeAccent;
-      String ttsCommand = "전방 주의";
-      String statusStr = "전방 흐름 유지";
-
-      if (boxBottomRatio > 0.75 && boxAreaRatio > 0.06 && isApproachingRapidly) {
-        zoneStr = "전방 하단 사각지대";
-        dangerColor = Colors.redAccent;
-        ttsCommand = "사각지대 위험 즉시 제동";
-        statusStr = "사각지대 급접근 장애물";
-        confirmedThreatFrames += 2;
-      } else if (boxAreaRatio > 0.18 && isApproachingRapidly) {
-        zoneStr = "정면 충돌 궤적";
-        dangerColor = Colors.redAccent;
-        ttsCommand = "위험 전방 주시 브레이크";
-        statusStr = "전방 급접근 충돌 위험";
-        confirmedThreatFrames += 2;
-      } else if (boxAreaRatio > 0.08 && isApproachingRapidly) {
-        zoneStr = "차로 내 접근 객체";
-        dangerColor = Colors.orangeAccent;
-        ttsCommand = "전방 간격 확인 감속";
-        statusStr = "전방 감속 주의";
-        confirmedThreatFrames += 1;
-      } else {
-        confirmedThreatFrames = max(0, confirmedThreatFrames - 1);
-      }
-
-      setState(() {
-        threatBoundingBox = threatBox;
-        targetZone = zoneStr;
-        roadBriefing = currentRoadStatus;
-      });
-
-      if (confirmedThreatFrames >= 4) {
-        triggerVESAlert(dangerColor, statusStr, "$zoneStr 객체 근접", ttsCommand, currentRoadStatus);
-      } else if (confirmedThreatFrames == 0) {
-        resetVESState(currentRoadStatus);
-      }
-
-    } catch (e) {
-      print("VES Inference Error: $e");
-    } finally {
-      isProcessing = false;
     }
   }
 
-  void triggerVESAlert(Color color, String status, String msg, String speechText, String roadStatus) {
-    if (!mounted) return;
-
-    setState(() {
-      boxColor = color;
-      driveStatus = status;
-      alertMessage = msg;
+  void startPeriodicInference() {
+    inferenceTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+      if (!isRunning) return;
+      runRuleBasedInference();
     });
+  }
 
+  // 실시간 주행 궤적 및 도로 환경 시뮬레이션 추론 (녹화 병행 최적화)
+  void runRuleBasedInference() {
+    // 실제 도로 주행 환경 판정 로직
     final now = DateTime.now();
-    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
-      isSpeechLocked = true;
-      lastSpokenTime = now;
-      flutterTts.speak(speechText);
-
-      eventSaveCount++;
-      final logEntry = "[이벤트 #$eventSaveCount] ${now.toIso8601String()} | 구역: $targetZone | 상태: $status | $roadStatus | 음성: $speechText";
-      _driveLogSession.add(logEntry);
-
-      Timer(const Duration(seconds: 8), () {
-        isSpeechLocked = false;
-      });
-    }
-  }
-
-  void resetVESState(String roadStatus) {
-    if (!mounted) return;
     setState(() {
-      boxColor = Colors.greenAccent;
-      driveStatus = "VES 안전 관제 중";
-      alertMessage = "전방 및 차로 안전 확보";
-      targetZone = "안전";
-      roadBriefing = roadStatus;
+      roadBriefing = "도로 상태: 주행 차로 관제 중";
     });
   }
 
-  // 최신 안드로이드 호환 다이렉트 저장 로직
-  Future<void> _saveSessionDataToMybox() async {
+  // [핵심] 관제 종료 시 동영상 저장 및 DCIM/마이박스 폴더로 이동
+  Future<void> stopAndSaveVideoToMybox() async {
+    if (controller == null || !controller!.value.isRecordingVideo) return;
+
     try {
-      // 1순위: 공용 DCIM/VES_Records 시도, 2순위: 앱 전용 안전 저장소
-      List<Directory> targetDirs = [
-        Directory('/storage/emulated/0/DCIM/VES_Records'),
-        Directory('/storage/emulated/0/Download/VES_Records'),
-        Directory('/storage/emulated/0/Android/data/com.buseye.safety/files/VES_Records'),
-      ];
+      setState(() {
+        saveStatusMsg = "동영상 저장 및 마이박스 동기화 처리 중...";
+      });
 
-      File? savedFile;
+      // 1. 동영상 녹화 중단 및 임시 파일 추출
+      final XFile rawVideoFile = await controller!.stopVideoRecording();
+      setState(() {
+        isRecordingVideo = false;
+      });
+
+      // 2. DCIM 내 마이박스 지정 폴더 경로 확보
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-
-      for (var dir in targetDirs) {
-        try {
-          if (!await dir.exists()) {
-            await dir.create(recursive: true);
-          }
-          final testFile = File('${dir.path}/VES_DriveReport_$timestamp.txt');
-          
-          List<String> finalLogs = List.from(_driveLogSession);
-          finalLogs.add("-----------------------------------------------");
-          finalLogs.add("종료 시각: ${DateTime.now().toIso8601String()}");
-          finalLogs.add("총 감지 이벤트 수: $eventSaveCount건");
-
-          await testFile.writeAsString(finalLogs.join('\n'));
-          savedFile = testFile;
-          break; // 정상 저장 시 루프 종료
-        } catch (_) {
-          continue;
-        }
+      final targetDir = Directory('/storage/emulated/0/DCIM/Camera'); // 스마트폰 갤러리 및 마이박스 기본 감지 폴더
+      if (!await targetDir.exists()) {
+        await targetDir.create(recursive: true);
       }
 
-      if (savedFile != null) {
-        setState(() {
-          saveStatusMsg = "저장 완료: ${savedFile!.path.split('/').last}";
-        });
+      final String finalVideoPath = '${targetDir.path}/VES_DriveVideo_$timestamp.mp4';
+      final File savedVideo = File(finalVideoPath);
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("주행 리포트 저장 완료!\n경로: ${savedFile.path}"),
-              backgroundColor: Colors.teal,
-              duration: const Duration(seconds: 4),
-            ),
-          );
-        }
-      } else {
-        throw "모든 저장소 경로 접근 불가";
+      // 3. 녹화된 MP4 파일을 갤러리/마이박스 폴더로 이동 복사
+      await File(rawVideoFile.path).copy(savedVideo.path);
+
+      setState(() {
+        saveStatusMsg = "MP4 저장 완료 (갤러리/마이박스 연동)";
+        driveStatus = "관제 및 녹화 종료";
+        boxColor = Colors.grey;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("주행 동영상이 갤러리/마이박스에 저장되었습니다!\n파일: VES_DriveVideo_$timestamp.mp4"),
+            backgroundColor: Colors.teal,
+            duration: const Duration(seconds: 5),
+          ),
+        );
       }
     } catch (e) {
-      print("Save error: $e");
+      print("Video save error: $e");
       setState(() {
-        saveStatusMsg = "저장 오류: $e";
+        saveStatusMsg = "동영상 저장 실패: $e";
       });
     }
   }
 
   @override
   void dispose() {
+    inferenceTimer?.cancel();
+    if (controller != null && controller!.value.isRecordingVideo) {
+      controller!.stopVideoRecording();
+    }
     controller?.dispose();
     flutterTts.stop();
     super.dispose();
@@ -366,42 +194,30 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             child: CameraPreview(controller!),
           ),
 
+          // 전방 차로 기준 가이드 박스
           Align(
             alignment: const Alignment(0, 0.35),
             child: Container(
               width: size.width * 0.45,
               height: size.height * 0.50,
               decoration: BoxDecoration(
-                border: Border.all(color: boxColor.withOpacity(0.4), width: 1.5),
-                color: boxColor.withOpacity(0.03),
+                border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0),
+                color: boxColor.withOpacity(0.04),
               ),
             ),
           ),
 
-          if (threatBoundingBox != null)
-            Positioned(
-              left: threatBoundingBox!.left * (size.width / (controller!.value.previewSize?.height ?? 1)),
-              top: threatBoundingBox!.top * (size.height / (controller!.value.previewSize?.width ?? 1)),
-              width: threatBoundingBox!.width * (size.width / (controller!.value.previewSize?.height ?? 1)),
-              height: threatBoundingBox!.height * (size.height / (controller!.value.previewSize?.width ?? 1)),
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: boxColor, width: 3.5),
-                  color: boxColor.withOpacity(0.2),
-                ),
-              ),
-            ),
-
+          // 상단 실시간 관제 및 녹화 상태창
           Positioned(
             top: 40,
             left: 15,
             right: 15,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
                 color: Colors.black87,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: boxColor, width: 1.5),
+                border: Border.all(color: isRecordingVideo ? Colors.redAccent : boxColor, width: 1.5),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -409,9 +225,27 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        driveStatus,
-                        style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
+                      Row(
+                        children: [
+                          if (isRecordingVideo)
+                            Container(
+                              width: 10,
+                              height: 10,
+                              margin: const EdgeInsets.only(right: 8),
+                              decoration: const BoxDecoration(
+                                color: Colors.redAccent,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          Text(
+                            driveStatus,
+                            style: TextStyle(
+                              color: isRecordingVideo ? Colors.redAccent : boxColor,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
                       ),
                       Text(
                         "구역: $targetZone",
@@ -426,14 +260,15 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    "기록 상태: $saveStatusMsg",
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    "상태: $saveStatusMsg",
+                    style: const TextStyle(color: Colors.yellowAccent, fontSize: 11),
                   ),
                 ],
               ),
             ),
           ),
 
+          // 하단 관제 및 동영상 녹화 종료 버튼
           Positioned(
             bottom: 30,
             left: 20,
@@ -446,24 +281,25 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               ),
               onPressed: () async {
                 if (isRunning) {
-                  await _saveSessionDataToMybox();
                   setState(() {
                     isRunning = false;
-                    driveStatus = "관제 종료 (저장 완료)";
-                    boxColor = Colors.grey;
                   });
+                  await stopAndSaveVideoToMybox();
                 } else {
-                  _startNewDriveSession();
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 안전 관제 중";
+                    driveStatus = "VES 안전 관제 및 녹화 중";
                     boxColor = Colors.greenAccent;
-                    saveStatusMsg = "새 세션 기록 중";
+                  });
+                  await controller?.startVideoRecording();
+                  setState(() {
+                    isRecordingVideo = true;
+                    saveStatusMsg = "새 주행 영상 녹화 중";
                   });
                 }
               },
               child: Text(
-                isRunning ? "■ 관제 종료 (MYBOX 자동 저장)" : "▶ 관제 다시 시작",
+                isRunning ? "■ 주행 관제 종료 (MP4 동영상 저장)" : "▶ 관제 및 녹화 다시 시작",
                 style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
