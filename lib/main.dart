@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:geolocator/geolocator.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -35,7 +36,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isRecordingVideo = false;
 
-  String driveStatus = "VES 전천후 실차 관제 중";
+  // 실제 GPS 속도 변수
+  double currentSpeedKmh = 0.0;
+  StreamSubscription<Position>? positionStream;
+
+  String driveStatus = "VES 실측 비전(YUV) 관제 중";
   Color boxColor = Colors.greenAccent;
   String alertLevel = "SAFE"; 
   String targetZone = "정상 주행로";
@@ -46,34 +51,34 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
-  Timer? visionScanTimer;
   bool isAnalyzingFrame = false;
+  int lastFrameTime = 0;
 
   final List<String> _driveLogSession = [];
   int eventSaveCount = 0;
   String saveStatusMsg = "대기 중";
 
-  // 전천후 필터 변수 (와이퍼, 우천 반사, 주야간 조도 적응)
+  // YUV 픽셀 기반 적응형 변수
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
   int hitCounter = 0;
   int safeReleaseCounter = 0;
-  int wiperBypassFrames = 0;
 
   @override
   void initState() {
     super.initState();
     initTTS();
     _startNewDriveSession();
+    initLocationAndSpeed();
     initCameraAndStart();
   }
 
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 실차 도로 EDR 관제 (우천/야간/역광 전천후 모드) ===");
+    _driveLogSession.add("=== VES 실차/실내 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("필터: 와이퍼 통과 바이패스 + 노면 빗길 난반사 상쇄 + 입체 윤곽 분별");
+    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 직결 (압축 데이터 배제)");
     _driveLogSession.add("--------------------------------------------------");
   }
 
@@ -81,6 +86,31 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     await flutterTts.setLanguage("ko-KR");
     await flutterTts.setSpeechRate(0.58);
     await flutterTts.setVolume(1.0);
+  }
+
+  Future<void> initLocationAndSpeed() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+
+    positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 1,
+      ),
+    ).listen((Position? position) {
+      if (position != null && mounted) {
+        setState(() {
+          currentSpeedKmh = position.speed * 3.6;
+          if (currentSpeedKmh < 3.0) currentSpeedKmh = 0.0; // 방 안 테스트 시 0 고정
+        });
+      }
+    });
   }
 
   Future<void> initCameraAndStart() async {
@@ -96,77 +126,88 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        await controller!.startVideoRecording();
-        setState(() {
-          isRecordingVideo = true;
-          saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
+        // MP4 녹화와 동시에 YUV 원시 픽셀 프레임 추출 (핵심 변경점)
+        await controller!.startVideoRecording(onAvailable: (CameraImage image) {
+          if (!isRunning) return;
+          
+          final int now = DateTime.now().millisecondsSinceEpoch;
+          // 초당 약 4프레임 분석 (250ms 간격)
+          if (now - lastFrameTime < 250) return;
+          
+          if (isAnalyzingFrame) return;
+
+          lastFrameTime = now;
+          isAnalyzingFrame = true;
+          processRealYuvFrame(image);
+          isAnalyzingFrame = false;
         });
 
-        startAllWeatherVisionLoop();
+        setState(() {
+          isRecordingVideo = true;
+          saveStatusMsg = "주행 영상(MP4) 및 픽셀 동시 분석 중";
+        });
+
       } catch (e) {
         debugPrint("Camera Start Error: $e");
       }
     }
   }
 
-  void startAllWeatherVisionLoop() {
-    visionScanTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) async {
-      if (!isRunning || controller == null || !controller!.value.isInitialized) return;
-      if (isAnalyzingFrame) return;
+  // 순수 Y (Luma: 밝기) 채널 픽셀 직접 분석
+  void processRealYuvFrame(CameraImage image) {
+    // 안드로이드 YUV_420_888 포맷에서 Y(밝기) 평면 추출
+    final Uint8List yPlane = image.planes[0].bytes;
+    final int width = image.width;
+    final int height = image.height;
+    final int rowStride = image.planes[0].bytesPerRow;
 
-      isAnalyzingFrame = true;
-      try {
-        final XFile snapshot = await controller!.takePicture();
-        final Uint8List bytes = await snapshot.readAsBytes();
-        await File(snapshot.path).delete();
+    int step = 8; // 성능을 위해 8픽셀 건너뛰며 스캔
 
-        processAllWeatherFrame(bytes);
-      } catch (e) {
-        // 녹화 충돌 프레임 통과
-      } finally {
-        isAnalyzingFrame = false;
-      }
-    });
-  }
+    // ROI (관심 구역: 화면 중앙~하단 40%~90%)
+    int roiStartY = (height * 0.40).toInt();
+    int roiEndY = (height * 0.90).toInt();
+    int roiStartX = (width * 0.20).toInt();
+    int roiEndX = (width * 0.80).toInt();
 
-  // 우천 빗길, 야간 헤드라이트, 주간 터널/역광 전천후 분석
-  void processAllWeatherFrame(Uint8List bytes) {
-    if (bytes.length < 12000) return;
-
-    final size = MediaQuery.of(context).size;
-    int step = 64;
-
-    // 1. 와이퍼 감지 및 화면 전체 순간 가림 바이패스
-    // 와이퍼가 지날 때는 1프레임 동안 전체 픽셀이 급변함 -> 1회성 프레임은 무시
-    int globalCheckSum = 0;
-    int checkCount = 0;
-    for (int i = 0; i < bytes.length; i += step * 8) {
-      globalCheckSum += bytes[i];
-      checkCount++;
-    }
-    double globalLuma = checkCount > 0 ? globalCheckSum / checkCount : 128.0;
-
-    // 2. 주행 관심 영역 (상단 하늘/가로등 배제, 노면 위 0~50m 전방 및 측면 ROI)
-    int roiStart = (bytes.length * 0.42).toInt();
-    int roiEnd = (bytes.length * 0.88).toInt();
-
-    int verticalDiffSum = 0; // 입체 구조물(차량/보행자)의 수직 윤곽
+    int edgeSum = 0;
     int sampleCount = 0;
+    int globalSum = 0;
+    int globalCount = 0;
 
-    for (int i = roiStart; i < roiEnd - (step * 2); i += step) {
-      // 바닥 난반사는 가로로 퍼지므로, 수직(Vertical) 명암 대비를 측정해 입체 객체만 추출
-      int vDiff = (bytes[i] - bytes[i + (step * 2)]).abs();
-      verticalDiffSum += vDiff;
-      sampleCount++;
+    // 1. 전체 조도 파악
+    for (int y = 0; y < height; y += step * 4) {
+      for (int x = 0; x < width; x += step * 4) {
+        int index = (y * rowStride) + x;
+        if (index < yPlane.length) {
+          globalSum += yPlane[index];
+          globalCount++;
+        }
+      }
+    }
+    double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
+
+    // 2. 사각지대/전방 장애물(수직 윤곽선) 파악
+    for (int y = roiStartY; y < roiEndY; y += step) {
+      for (int x = roiStartX; x < roiEndX; x += step) {
+        int currentIndex = (y * rowStride) + x;
+        int nextYIndex = ((y + step) * rowStride) + x;
+
+        if (nextYIndex < yPlane.length) {
+          // 실제 픽셀 간 밝기 차이 = 물체의 윤곽선(명암비)
+          int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
+          edgeSum += diff;
+          sampleCount++;
+        }
+      }
     }
 
     if (sampleCount == 0) return;
 
-    // 조도 적응형 구조 점유도 (Structure Density) 계산
-    double rawStructure = verticalDiffSum / sampleCount;
-    // 야간 저조도에서는 감도 1.6배 보정, 주간 역광에서는 정규화
-    double normalizedStructure = (globalLuma < 50) 
-        ? rawStructure * 1.6 
+    double rawStructure = edgeSum / sampleCount;
+    
+    // 조명 정규화 (방 안 실내등 vs 야간 헤드라이트 보정)
+    double normalizedStructure = (globalLuma < 60) 
+        ? rawStructure * 1.5 
         : rawStructure * (120.0 / (globalLuma + 50.0));
 
     if (baselineStructure == 0.0) {
@@ -175,22 +216,22 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       return;
     }
 
-    // 와이퍼 통과 필터 (단 1프레임 급변 후 다음 프레임 정상 복귀하는 특성 차단)
-    double frameJump = (normalizedStructure - prevStructure).abs();
-    if (frameJump > 35.0 && wiperBypassFrames == 0) {
-      wiperBypassFrames = 1;
-      prevStructure = normalizedStructure;
-      return; // 와이퍼 통과 순간 스킵
-    }
-    wiperBypassFrames = 0;
-
-    // 실제 장애물 편차 및 접근 팽창 속도
+    // 실제 화면 픽셀의 윤곽선 밀도 변화량
     double structureDelta = (normalizedStructure - baselineStructure).abs();
     double expansionSpeed = normalizedStructure - prevStructure;
 
+    // 속도 보정: 방 안 테스트(0km/h)에서도 잘 반응하도록 기본값 1.0 보장
+    double speedMultiplier = 1.0;
+    if (currentSpeedKmh > 50) speedMultiplier = 1.3;
+    
+    double adjustedDelta = structureDelta * speedMultiplier;
+    double adjustedExpansion = expansionSpeed * speedMultiplier;
+
     setState(() {
-      // 1. 돌발 급침범 (사람 뛰어들기, 야간 사각지대 급출현, 대각선 컷인)
-      if (expansionSpeed > 15.0 || (structureDelta > 28.0 && expansionSpeed > 9.0)) {
+      // 픽셀 임계치: JPEG 압축이 아닌 순수 픽셀이므로 임계치를 현실화 (방안 손/사람 반응)
+      
+      // 1. 돌발 급침범 (카메라 앞을 갑자기 손으로 가리거나 확 다가올 때)
+      if (adjustedExpansion > 6.0 || (adjustedDelta > 12.0 && adjustedExpansion > 3.0)) {
         hitCounter = 4;
         safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
@@ -207,8 +248,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
       }
-      // 2. 3단계 최종 추돌 위험 (근거리 제동 구간 진입)
-      else if (structureDelta > 24.0) {
+      // 2. 3단계 최종 추돌 위험 (근접)
+      else if (adjustedDelta > 9.0) {
         hitCounter = max(hitCounter + 1, 3);
         safeReleaseCounter = 0;
         alertLevel = "DANGER_BRAKE";
@@ -225,8 +266,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
-      // 3. 2단계 감속 권고 (약 30~50m 전방 장애물 접근)
-      else if (structureDelta > 16.0) {
+      // 3. 2단계 감속 권고
+      else if (adjustedDelta > 6.0) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -245,8 +286,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
         }
       }
-      // 4. 1단계 전방 주의 (약 80~100m 원거리 물체)
-      else if (structureDelta > 11.0) {
+      // 4. 1단계 전방 주의 (손이나 사람이 멀리서 포착될 때)
+      else if (adjustedDelta > 3.5) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -265,18 +306,18 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           triggerAlert("전방 주의하십시오", "1단계 전방 주의");
         }
       }
-      // 5. 안전 주행로 (환경 변화 점진 흡수)
+      // 5. 안전 (물체가 사라지면 1초 후 복귀)
       else {
         safeReleaseCounter++;
-        if (safeReleaseCounter >= 4) { // 1초 지속 유지 후 해제
+        if (safeReleaseCounter >= 4) {
           hitCounter = 0;
           alertLevel = "SAFE";
           boxColor = Colors.greenAccent;
           threatBoundingBox = null;
           targetZone = "정상 주행로";
-          driveStatus = "VES 전천후 실차 관제 중";
+          driveStatus = "VES 실측 비전(YUV) 관제 중";
           collisionAngle = 0;
-          baselineStructure = (baselineStructure * 0.93) + (normalizedStructure * 0.07);
+          baselineStructure = (baselineStructure * 0.90) + (normalizedStructure * 0.10);
         }
       }
 
@@ -294,7 +335,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       flutterTts.speak(speechText);
 
       eventSaveCount++;
-      final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 단계: $alertLevel | 각도: ${collisionAngle}° | $status | 음성: $speechText";
+      final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 속도: ${currentSpeedKmh.toStringAsFixed(0)}km/h | 단계: $alertLevel | 각도: ${collisionAngle}° | $status";
       _driveLogSession.add(logEntry);
 
       Timer(Duration(seconds: cooldownSec), () {
@@ -332,7 +373,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        saveStatusMsg = "MP4 및 EDR 저장 완료 (MYBOX 연동)";
+        saveStatusMsg = "MP4 및 EDR 저장 완료";
         driveStatus = "관제 및 녹화 종료";
         boxColor = Colors.grey;
       });
@@ -340,7 +381,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("주행 영상과 EDR 리포트 저장 완료!\n파일명: VES_DriveVideo_$timestamp.mp4"),
+            content: Text("저장 완료!\n파일명: VES_DriveVideo_$timestamp.mp4"),
             backgroundColor: Colors.teal,
             duration: const Duration(seconds: 4),
           ),
@@ -353,7 +394,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   @override
   void dispose() {
-    visionScanTimer?.cancel();
+    positionStream?.cancel();
     if (controller != null && controller!.value.isRecordingVideo) {
       controller!.stopVideoRecording();
     }
@@ -439,18 +480,18 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                               ),
                             ),
                           Text(
-                            driveStatus,
-                            style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
+                            "${currentSpeedKmh.toStringAsFixed(0)} km/h",
+                            style: const TextStyle(color: Colors.cyanAccent, fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
                       Text(
-                        "추돌각: ${collisionAngle}°",
-                        style: const TextStyle(color: Colors.yellowAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                        driveStatus,
+                        style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -493,10 +534,20 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 전천후 실차 관제 중";
+                    driveStatus = "VES 실측 비전(YUV) 관제 중";
                     boxColor = Colors.greenAccent;
                   });
-                  await controller?.startVideoRecording();
+                  await controller?.startVideoRecording(onAvailable: (CameraImage image) {
+                    if (!isRunning) return;
+                    final int now = DateTime.now().millisecondsSinceEpoch;
+                    if (now - lastFrameTime < 250) return;
+                    if (isAnalyzingFrame) return;
+
+                    lastFrameTime = now;
+                    isAnalyzingFrame = true;
+                    processRealYuvFrame(image);
+                    isAnalyzingFrame = false;
+                  });
                   setState(() {
                     isRecordingVideo = true;
                     saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
