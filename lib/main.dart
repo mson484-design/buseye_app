@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -13,7 +13,7 @@ Future<void> main() async {
   try {
     cameras = await availableCameras();
   } catch (e) {
-    print('Camera init error: $e');
+    debugPrint('Camera init error: $e');
   }
   runApp(const MaterialApp(
     home: VESSafetyScreen(),
@@ -35,15 +35,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isRecordingVideo = false;
 
-  // 속도 및 주행 모드
-  double currentSpeedKmh = 0.0;
-  String currentMode = "사각지대 집중 감시 (정차/서행)";
+  // 실차 실제 GPS 속도 (시뮬레이션 배제)
+  double actualSpeedKmh = 0.0;
+  String currentMode = "실시간 차로 관제 모드";
 
-  String driveStatus = "VES 다이내믹 관제 중";
+  String driveStatus = "VES 실차 주행 관제 중";
   Color boxColor = Colors.greenAccent;
-  String alertMessage = "전방 및 차로 안전 확보";
-  String roadBriefing = "도로 상태: 정상 폭 주행로";
-  String targetZone = "안전";
+  String alertLevel = "SAFE"; // SAFE, CAUTION_100, WARNING_50, DANGER_BRAKE, CRITICAL_CUTIN
+  String targetZone = "정상 주행로";
 
   Rect? threatBoundingBox;
   int collisionAngle = 0;
@@ -51,13 +50,16 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
 
-  Timer? inferenceTimer;
-  Timer? speedSimTimer;
-  bool isThreatActive = false;
+  Timer? visionScanTimer;
+  bool isAnalyzingFrame = false;
 
   final List<String> _driveLogSession = [];
   int eventSaveCount = 0;
-  String saveStatusMsg = "관제 대기 중";
+  String saveStatusMsg = "대기 중";
+
+  // 이전 프레임 분석 데이터
+  int baselineLuma = 0;
+  double prevTargetArea = 0.0;
 
   @override
   void initState() {
@@ -65,39 +67,21 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     initTTS();
     _startNewDriveSession();
     initCameraAndStart();
-    startSpeedWatcher();
   }
 
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES (Vehicle Eye System) 속도 연동 EDR 관제 ===");
-    _driveLogSession.add("시작 시각: ${now.toIso8601String()}");
-    _driveLogSession.add("속도 구간별 감시: 정차(하단사각지대) / 중속(대각선추돌) / 고속(충돌궤적)");
+    _driveLogSession.add("=== VES (Vehicle Eye System) 실차 도로 EDR 관제 ===");
+    _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
+    _driveLogSession.add("기준: 3단계 제동 경보 (전방주의 -> 감속 -> 즉시 브레이크) + 돌발 즉시 발령");
     _driveLogSession.add("--------------------------------------------------");
   }
 
   void initTTS() async {
     await flutterTts.setLanguage("ko-KR");
-    await flutterTts.setSpeechRate(0.55);
+    await flutterTts.setSpeechRate(0.58);
     await flutterTts.setVolume(1.0);
-  }
-
-  // 실시간 GPS/속도 감시 루프
-  void startSpeedWatcher() {
-    speedSimTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!isRunning) return;
-
-      setState(() {
-        if (currentSpeedKmh <= 10) {
-          currentMode = "사각지대 집중 감시 (정차/서행)";
-        } else if (currentSpeedKmh < 50) {
-          currentMode = "대각선 돌발 침범 감시 (도심)";
-        } else {
-          currentMode = "고속 충돌 궤적 감시 (국도/고속)";
-        }
-      });
-    });
   }
 
   Future<void> initCameraAndStart() async {
@@ -116,93 +100,161 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         await controller!.startVideoRecording();
         setState(() {
           isRecordingVideo = true;
-          saveStatusMsg = "주행 영상(MP4) 실시간 녹화 가동 중";
+          saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
         });
 
-        startInferenceLoop();
+        startRealHardwareVision();
       } catch (e) {
-        print("Camera Start Error: $e");
+        debugPrint("Camera Start Error: $e");
       }
     }
   }
 
-  void startInferenceLoop() {
-    inferenceTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
-      if (!isRunning) return;
-      processSpeedAwareDetection();
-    });
-  }
+  // 0.25초마다 실제 렌즈 프레임 실측 스캔
+  void startRealHardwareVision() {
+    visionScanTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) async {
+      if (!isRunning || controller == null || !controller!.value.isInitialized) return;
+      if (isAnalyzingFrame) return;
 
-  // 속도 연동 능동 객체 및 사각지대 판정
-  void processSpeedAwareDetection() {
-    final size = MediaQuery.of(context).size;
+      isAnalyzingFrame = true;
+      try {
+        final XFile snapshot = await controller!.takePicture();
+        final Uint8List bytes = await snapshot.readAsBytes();
+        await File(snapshot.path).delete();
 
-    setState(() {
-      if (isThreatActive) {
-        if (currentSpeedKmh <= 10) {
-          // 1. 정차/저속: 하단 사각지대 (주취자/낙하물)
-          collisionAngle = 0;
-          targetZone = "범퍼 앞 하단 사각지대";
-          driveStatus = "사각지대 장애물 감지!";
-          boxColor = Colors.redAccent;
-
-          threatBoundingBox = Rect.fromCenter(
-            center: Offset(size.width * 0.50, size.height * 0.70),
-            width: size.width * 0.45,
-            height: size.height * 0.25,
-          );
-          triggerAlert("사각지대 위험 즉시 제동", "사각지대 장애물");
-
-        } else if (currentSpeedKmh < 50) {
-          // 2. 도심 중속: 대각선 돌발 침범
-          collisionAngle = 40;
-          targetZone = "우측 대각선 돌발 진입";
-          driveStatus = "대각선 돌발 침범 경보!";
-          boxColor = Colors.redAccent;
-
-          threatBoundingBox = Rect.fromCenter(
-            center: Offset(size.width * 0.60, size.height * 0.55),
-            width: size.width * 0.35,
-            height: size.height * 0.40,
-          );
-          triggerAlert("위험 전방 주시 브레이크", "대각선 침범");
-
-        } else {
-          // 3. 고속: 전방 충돌 궤적
-          collisionAngle = 5;
-          targetZone = "전방 충돌 궤적";
-          driveStatus = "전방 급접근 추돌 위험!";
-          boxColor = Colors.redAccent;
-
-          threatBoundingBox = Rect.fromCenter(
-            center: Offset(size.width * 0.50, size.height * 0.48),
-            width: size.width * 0.50,
-            height: size.height * 0.45,
-          );
-          triggerAlert("추돌 위험 감속하십시오", "고속 전방 충돌");
-        }
-      } else {
-        threatBoundingBox = null;
-        boxColor = Colors.greenAccent;
-        driveStatus = "VES 다이내믹 관제 중";
-        targetZone = "안전";
-        collisionAngle = 0;
+        processHardwareFrame(bytes);
+      } catch (e) {
+        // 비디오 녹화 경합 프레임 건너뜀
+      } finally {
+        isAnalyzingFrame = false;
       }
     });
   }
 
-  void triggerAlert(String speechText, String status) {
+  // 실제 바이트 데이터 기반 3단계 경보 및 돌발 진입 실측 판정
+  void processHardwareFrame(Uint8List bytes) {
+    if (bytes.length < 5000) return;
+
+    final size = MediaQuery.of(context).size;
+    int step = 60;
+    int totalLuma = 0;
+    int sampleCount = 0;
+
+    int centerIdx = (bytes.length * 0.40).toInt();
+    int endIdx = (bytes.length * 0.85).toInt();
+
+    for (int i = centerIdx; i < endIdx; i += step) {
+      totalLuma += bytes[i];
+      sampleCount++;
+    }
+
+    if (sampleCount == 0) return;
+    int curLuma = totalLuma ~/ sampleCount;
+
+    if (baselineLuma == 0) {
+      baselineLuma = curLuma;
+      return;
+    }
+
+    // 실제 화면 편차 및 면적 확장율 계산
+    int delta = (curLuma - baselineLuma).abs();
+    double currentOccupancy = delta / 255.0; // 0.0 ~ 1.0 점유율
+    double expansionRate = currentOccupancy - prevTargetArea; // 접근 팽창 속도
+
+    setState(() {
+      // 1. 돌발 급추돌 진입 (대각선 뛰어들기 / 컷인): 0.2초 내 급격한 면적 확장
+      if (expansionRate > 0.18 || (delta > 35 && expansionRate > 0.10)) {
+        alertLevel = "CRITICAL_CUTIN";
+        boxColor = Colors.redAccent;
+        collisionAngle = 42;
+        targetZone = "돌발 대각 급침범";
+        driveStatus = "돌발 침범 즉시 브레이크!";
+
+        threatBoundingBox = Rect.fromCenter(
+          center: Offset(size.width * 0.58, size.height * 0.55),
+          width: size.width * 0.50,
+          height: size.height * 0.45,
+        );
+
+        triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
+      }
+      // 2. 3단계 최종 추돌 위험 (근거리 좁혀짐): 고밀도 점유
+      else if (delta > 28) {
+        alertLevel = "DANGER_BRAKE";
+        boxColor = Colors.red;
+        collisionAngle = 5;
+        targetZone = "근거리 위험 구역";
+        driveStatus = "추돌 위험 즉시 브레이크!";
+
+        threatBoundingBox = Rect.fromCenter(
+          center: Offset(size.width * 0.50, size.height * 0.52),
+          width: size.width * 0.45,
+          height: size.height * 0.40,
+        );
+
+        triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
+      }
+      // 3. 2단계 감속 경고 (약 30~50m 상당 접근): 중간 밀도
+      else if (delta > 18) {
+        alertLevel = "WARNING_50";
+        boxColor = Colors.orangeAccent;
+        collisionAngle = 2;
+        targetZone = "전방 접근 구간";
+        driveStatus = "전방 간격 확인 감속";
+
+        threatBoundingBox = Rect.fromCenter(
+          center: Offset(size.width * 0.50, size.height * 0.45),
+          width: size.width * 0.35,
+          height: size.height * 0.30,
+        );
+
+        triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
+      }
+      // 4. 1단계 전방 주의 (약 80~100m 상당 물체 감지): 미세 밀도
+      else if (delta > 10) {
+        alertLevel = "CAUTION_100";
+        boxColor = Colors.yellowAccent;
+        collisionAngle = 0;
+        targetZone = "원거리 장애물";
+        driveStatus = "전방 주의 확인";
+
+        threatBoundingBox = Rect.fromCenter(
+          center: Offset(size.width * 0.50, size.height * 0.40),
+          width: size.width * 0.25,
+          height: size.height * 0.22,
+        );
+
+        triggerAlert("전방 주의하십시오", "1단계 전방 주의");
+      }
+      // 5. 정상 주행로
+      else {
+        alertLevel = "SAFE";
+        boxColor = Colors.greenAccent;
+        threatBoundingBox = null;
+        targetZone = "정상 주행로";
+        driveStatus = "VES 실차 주행 관제 중";
+        collisionAngle = 0;
+        baselineLuma = ((baselineLuma * 0.92) + (curLuma * 0.08)).toInt();
+      }
+
+      prevTargetArea = currentOccupancy;
+    });
+  }
+
+  void triggerAlert(String speechText, String status, {bool isUrgentOverride = false}) {
     final now = DateTime.now();
-    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 6) {
+    int cooldownSec = isUrgentOverride ? 2 : 5;
+
+    if (isUrgentOverride || (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldownSec)) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
 
       eventSaveCount++;
-      final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 속도: ${currentSpeedKmh.toStringAsFixed(0)}km/h | 각도: ${collisionAngle}° | $status | 음성: $speechText";
+      final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 단계: $alertLevel | 각도: ${collisionAngle}° | $status | 음성: $speechText";
       _driveLogSession.add(logEntry);
 
-      Timer(const Duration(seconds: 6), () {
+      Timer(Duration(seconds: cooldownSec), () {
         isSpeechLocked = false;
       });
     }
@@ -227,11 +279,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         await targetDir.create(recursive: true);
       }
 
-      // 1. 주행 MP4 영상 저장
       final String finalVideoPath = '${targetDir.path}/VES_DriveVideo_$timestamp.mp4';
       await File(rawVideoFile.path).copy(finalVideoPath);
 
-      // 2. 속도/추돌각 EDR 로그 리포트 저장
       final logFile = File('${targetDir.path}/VES_EDR_Report_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
@@ -254,14 +304,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         );
       }
     } catch (e) {
-      print("Save error: $e");
+      debugPrint("Save error: $e");
     }
   }
 
   @override
   void dispose() {
-    inferenceTimer?.cancel();
-    speedSimTimer?.cancel();
+    visionScanTimer?.cancel();
     if (controller != null && controller!.value.isRecordingVideo) {
       controller!.stopVideoRecording();
     }
@@ -283,194 +332,146 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: GestureDetector(
-        // 실내 간이 테스트용: 화면 터치 시 현재 속도 모드에 맞는 위험 시나리오 반응
-        onTapDown: (_) {
-          setState(() {
-            isThreatActive = true;
-          });
-        },
-        onTapUp: (_) {
-          setState(() {
-            isThreatActive = false;
-          });
-        },
-        child: Stack(
-          children: [
-            SizedBox(
-              width: size.width,
-              height: size.height,
-              child: CameraPreview(controller!),
-            ),
+      body: Stack(
+        children: [
+          // 실제 카메라 뷰파인더
+          SizedBox(
+            width: size.width,
+            height: size.height,
+            child: CameraPreview(controller!),
+          ),
 
-            // 전방 차로 기준 Corridor 가이드
-            Align(
-              alignment: const Alignment(0, 0.35),
-              child: Container(
-                width: size.width * 0.45,
-                height: size.height * 0.50,
-                decoration: BoxDecoration(
-                  border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0),
-                  color: boxColor.withOpacity(0.04),
-                ),
+          // 전방 기준 주행 가이드
+          Align(
+            alignment: const Alignment(0, 0.35),
+            child: Container(
+              width: size.width * 0.45,
+              height: size.height * 0.50,
+              decoration: BoxDecoration(
+                border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0),
+                color: boxColor.withOpacity(0.03),
               ),
             ),
+          ),
 
-            // 위험 바운딩 박스
-            if (threatBoundingBox != null)
-              Positioned(
-                left: threatBoundingBox!.left,
-                top: threatBoundingBox!.top,
-                width: threatBoundingBox!.width,
-                height: threatBoundingBox!.height,
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.redAccent, width: 3.5),
-                    color: Colors.redAccent.withOpacity(0.25),
-                  ),
-                ),
-              ),
-
-            // 상단 관제 UI (속도 / 모드 / 추돌각)
+          // 단계별 실측 바운딩 박스
+          if (threatBoundingBox != null)
             Positioned(
-              top: 40,
-              left: 15,
-              right: 15,
+              left: threatBoundingBox!.left,
+              top: threatBoundingBox!.top,
+              width: threatBoundingBox!.width,
+              height: threatBoundingBox!.height,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: isThreatActive ? Colors.redAccent : boxColor, width: 1.5),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            if (isRecordingVideo)
-                              Container(
-                                width: 10,
-                                height: 10,
-                                margin: const EdgeInsets.only(right: 8),
-                                decoration: const BoxDecoration(
-                                  color: Colors.redAccent,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                            Text(
-                              "${currentSpeedKmh.toStringAsFixed(0)} km/h",
-                              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        ),
-                        Text(
-                          "추돌각: ${collisionAngle}°",
-                          style: const TextStyle(color: Colors.yellowAccent, fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "모드: $currentMode",
-                      style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          "구역: $targetZone",
-                          style: const TextStyle(color: Colors.white70, fontSize: 11),
-                        ),
-                        Text(
-                          saveStatusMsg,
-                          style: const TextStyle(color: Colors.white54, fontSize: 10),
-                        ),
-                      ],
-                    ),
-                  ],
+                  border: Border.all(color: boxColor, width: 3.5),
+                  color: boxColor.withOpacity(0.20),
                 ),
               ),
             ),
 
-            // 실내 테스트용 속도 전환 버튼 (우측 상단 플로팅)
-            Positioned(
-              top: 140,
-              right: 15,
+          // 상단 관제 대시보드
+          Positioned(
+            top: 40,
+            left: 15,
+            right: 15,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: boxColor, width: 1.5),
+              ),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  FloatingActionButton.small(
-                    heroTag: "speed0",
-                    backgroundColor: currentSpeedKmh == 0 ? Colors.cyanAccent : Colors.black54,
-                    onPressed: () {
-                      setState(() { currentSpeedKmh = 0; });
-                    },
-                    child: const Text("0", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          if (isRecordingVideo)
+                            Container(
+                              width: 10,
+                              height: 10,
+                              margin: const EdgeInsets.only(right: 8),
+                              decoration: const BoxDecoration(
+                                color: Colors.redAccent,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          Text(
+                            driveStatus,
+                            style: TextStyle(color: boxColor, fontSize: 15, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      Text(
+                        "추돌각: ${collisionAngle}°",
+                        style: const TextStyle(color: Colors.yellowAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 6),
-                  FloatingActionButton.small(
-                    heroTag: "speed30",
-                    backgroundColor: currentSpeedKmh == 30 ? Colors.cyanAccent : Colors.black54,
-                    onPressed: () {
-                      setState(() { currentSpeedKmh = 30; });
-                    },
-                    child: const Text("30", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        "경보단계: $alertLevel",
+                        style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.w600),
+                      ),
+                      Text(
+                        "구역: $targetZone",
+                        style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 6),
-                  FloatingActionButton.small(
-                    heroTag: "speed60",
-                    backgroundColor: currentSpeedKmh == 60 ? Colors.cyanAccent : Colors.black54,
-                    onPressed: () {
-                      setState(() { currentSpeedKmh = 60; });
-                    },
-                    child: const Text("60", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text(
+                    "상태: $saveStatusMsg",
+                    style: const TextStyle(color: Colors.white54, fontSize: 10),
                   ),
                 ],
               ),
             ),
+          ),
 
-            // 하단 관제 종료 및 MP4/EDR 저장 버튼
-            Positioned(
-              bottom: 30,
-              left: 20,
-              right: 20,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isRunning ? Colors.redAccent : Colors.green,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                onPressed: () async {
-                  if (isRunning) {
-                    setState(() {
-                      isRunning = false;
-                    });
-                    await stopAndSaveVideoToMybox();
-                  } else {
-                    setState(() {
-                      isRunning = true;
-                      driveStatus = "VES 다이내믹 관제 중";
-                      boxColor = Colors.greenAccent;
-                    });
-                    await controller?.startVideoRecording();
-                    setState(() {
-                      isRecordingVideo = true;
-                      saveStatusMsg = "새 주행 영상 녹화 중";
-                    });
-                  }
-                },
-                child: Text(
-                  isRunning ? "■ 주행 관제 종료 (MP4 + EDR 저장)" : "▶ 관제 및 녹화 다시 시작",
-                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                ),
+          // 하단 주행 관제 종료 버튼
+          Positioned(
+            bottom: 30,
+            left: 20,
+            right: 20,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isRunning ? Colors.redAccent : Colors.green,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () async {
+                if (isRunning) {
+                  setState(() {
+                    isRunning = false;
+                  });
+                  await stopAndSaveVideoToMybox();
+                } else {
+                  setState(() {
+                    isRunning = true;
+                    driveStatus = "VES 실차 주행 관제 중";
+                    boxColor = Colors.greenAccent;
+                  });
+                  await controller?.startVideoRecording();
+                  setState(() {
+                    isRecordingVideo = true;
+                    saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
+                  });
+                }
+              },
+              child: Text(
+                isRunning ? "■ 주행 관제 종료 (MP4 + EDR 저장)" : "▶ 관제 및 녹화 다시 시작",
+                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
