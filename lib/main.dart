@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart'; // 웹 빌드 에러 방지용 추가
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -96,7 +97,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        await controller!.startImageStream((CameraImage image) {
+        // 에러 원인이었던 await를 삭제했습니다.
+        controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           
           final int now = DateTime.now().millisecondsSinceEpoch;
@@ -296,8 +298,17 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       await controller!.stopImageStream();
       setState(() { isStreaming = false; });
 
+      // 웹 빌드 에러 방지 처리
+      if (kIsWeb) {
+        setState(() {
+          saveStatusMsg = "웹 환경에서는 EDR 저장이 지원되지 않습니다.";
+          driveStatus = "관제 종료";
+          boxColor = Colors.grey;
+        });
+        return;
+      }
+
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      // 마이박스 연동을 위해 Camera 폴더에 직접 저장
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
@@ -399,7 +410,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
-                    await controller!.startImageStream((CameraImage image) {
+                    // 에러 원인이었던 await를 삭제했습니다.
+                    controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
                       if (now - lastFrameTime < 250) return;
