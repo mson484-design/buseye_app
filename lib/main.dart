@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart'; // 웹 빌드 에러 방지용 추가
+import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -54,7 +54,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   int eventSaveCount = 0;
   String saveStatusMsg = "대기 중";
 
-  // YUV 픽셀 기반 변수
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
   int hitCounter = 0;
@@ -73,7 +72,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 실내/실차 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석 (시뮬레이션 배제)");
+    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석");
     _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -97,13 +96,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        // 에러 원인이었던 await를 삭제했습니다.
+        // 문법 오류 100% 차단 (await 제거)
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
-          
           final int now = DateTime.now().millisecondsSinceEpoch;
           if (now - lastFrameTime < 250) return; 
-          
           if (isAnalyzingFrame) return;
 
           lastFrameTime = now;
@@ -130,7 +127,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     final int rowStride = image.planes[0].bytesPerRow;
 
     int step = 8; 
-
     int roiStartY = (height * 0.40).toInt();
     int roiEndY = (height * 0.90).toInt();
     int roiStartX = (width * 0.20).toInt();
@@ -156,7 +152,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       for (int x = roiStartX; x < roiEndX; x += step) {
         int currentIndex = (y * rowStride) + x;
         int nextYIndex = ((y + step) * rowStride) + x;
-
         if (nextYIndex < yPlane.length) {
           int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
           edgeSum += diff;
@@ -190,13 +185,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         collisionAngle = 45;
         targetZone = "돌발 대각 급침범";
         driveStatus = "돌발 침범 즉시 브레이크!";
-
         threatBoundingBox = Rect.fromCenter(
           center: Offset(size.width * 0.58, size.height * 0.55),
           width: size.width * 0.52,
           height: size.height * 0.45,
         );
-
         triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
       }
       else if (structureDelta > 9.0) {
@@ -207,13 +200,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         collisionAngle = 5;
         targetZone = "근거리 위험 구역";
         driveStatus = "추돌 위험 즉시 브레이크!";
-
         threatBoundingBox = Rect.fromCenter(
           center: Offset(size.width * 0.50, size.height * 0.52),
           width: size.width * 0.46,
           height: size.height * 0.42,
         );
-
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
       else if (structureDelta > 6.0) {
@@ -225,13 +216,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           collisionAngle = 2;
           targetZone = "전방 접근 구간";
           driveStatus = "전방 간격 확인 감속";
-
           threatBoundingBox = Rect.fromCenter(
             center: Offset(size.width * 0.50, size.height * 0.45),
             width: size.width * 0.35,
             height: size.height * 0.30,
           );
-
           triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
         }
       }
@@ -244,13 +233,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           collisionAngle = 0;
           targetZone = "전방 감지 구역";
           driveStatus = "전방 주의 확인";
-
           threatBoundingBox = Rect.fromCenter(
             center: Offset(size.width * 0.50, size.height * 0.42),
             width: size.width * 0.28,
             height: size.height * 0.24,
           );
-
           triggerAlert("전방 주의하십시오", "1단계 전방 주의");
         }
       }
@@ -274,16 +261,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void triggerAlert(String speechText, String status, {bool isUrgentOverride = false}) {
     final now = DateTime.now();
     int cooldownSec = isUrgentOverride ? 2 : 5;
-
     if (isUrgentOverride || (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldownSec)) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
-
       eventSaveCount++;
       final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 단계: $alertLevel | 각도: ${collisionAngle}° | $status";
       _driveLogSession.add(logEntry);
-
       Timer(Duration(seconds: cooldownSec), () {
         isSpeechLocked = false;
       });
@@ -295,10 +279,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     try {
       setState(() { saveStatusMsg = "EDR 텍스트 로그 저장 중..."; });
       
-      await controller!.stopImageStream();
+      // 문법 오류 원인이었던 await 완전히 삭제
+      controller!.stopImageStream();
       setState(() { isStreaming = false; });
 
-      // 웹 빌드 에러 방지 처리
       if (kIsWeb) {
         setState(() {
           saveStatusMsg = "웹 환경에서는 EDR 저장이 지원되지 않습니다.";
@@ -331,7 +315,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   @override
   void dispose() {
     if (controller != null && isStreaming) {
-      controller!.stopImageStream();
+      controller!.stopImageStream(); 
     }
     controller?.dispose();
     flutterTts.stop();
@@ -410,7 +394,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
-                    // 에러 원인이었던 await를 삭제했습니다.
+                    // await 완전히 삭제
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
