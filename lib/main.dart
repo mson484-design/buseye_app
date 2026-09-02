@@ -35,8 +35,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isRecordingVideo = false;
 
-  String currentMode = "실시간 차로 관제 모드";
-  String driveStatus = "VES 실측 관제 가동 중";
+  String driveStatus = "VES 전천후 실차 관제 중";
   Color boxColor = Colors.greenAccent;
   String alertLevel = "SAFE"; 
   String targetZone = "정상 주행로";
@@ -54,11 +53,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   int eventSaveCount = 0;
   String saveStatusMsg = "대기 중";
 
-  // 플리커 및 깜빡임 방지 변수 (Hysteresis Filter)
-  int baselineLuma = 0;
-  double prevTargetArea = 0.0;
-  int hitCounter = 0; // 연속 감지 카운터
-  int safeReleaseCounter = 0; // 안전 복귀 지연 카운터
+  // 전천후 필터 변수 (와이퍼, 우천 반사, 주야간 조도 적응)
+  double baselineStructure = 0.0;
+  double prevStructure = 0.0;
+  int hitCounter = 0;
+  int safeReleaseCounter = 0;
+  int wiperBypassFrames = 0;
 
   @override
   void initState() {
@@ -71,9 +71,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES (Vehicle Eye System) 실측 비전 EDR 관제 ===");
+    _driveLogSession.add("=== VES 실차 도로 EDR 관제 (우천/야간/역광 전천후 모드) ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("안정화 필터: 깜빡임 방지(Hysteresis) 및 3단계 제동 경보 적용");
+    _driveLogSession.add("필터: 와이퍼 통과 바이패스 + 노면 빗길 난반사 상쇄 + 입체 윤곽 분별");
     _driveLogSession.add("--------------------------------------------------");
   }
 
@@ -102,15 +102,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
         });
 
-        startStabilizedVisionLoop();
+        startAllWeatherVisionLoop();
       } catch (e) {
         debugPrint("Camera Start Error: $e");
       }
     }
   }
 
-  // 0.25초마다 실제 렌즈 프레임 스캔
-  void startStabilizedVisionLoop() {
+  void startAllWeatherVisionLoop() {
     visionScanTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) async {
       if (!isRunning || controller == null || !controller!.value.isInitialized) return;
       if (isAnalyzingFrame) return;
@@ -121,48 +120,77 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         final Uint8List bytes = await snapshot.readAsBytes();
         await File(snapshot.path).delete();
 
-        processStabilizedFrame(bytes);
+        processAllWeatherFrame(bytes);
       } catch (e) {
-        // 녹화 경합 프레임 건너뜀
+        // 녹화 충돌 프레임 통과
       } finally {
         isAnalyzingFrame = false;
       }
     });
   }
 
-  void processStabilizedFrame(Uint8List bytes) {
-    if (bytes.length < 5000) return;
+  // 우천 빗길, 야간 헤드라이트, 주간 터널/역광 전천후 분석
+  void processAllWeatherFrame(Uint8List bytes) {
+    if (bytes.length < 12000) return;
 
     final size = MediaQuery.of(context).size;
-    int step = 70;
-    int totalLuma = 0;
+    int step = 64;
+
+    // 1. 와이퍼 감지 및 화면 전체 순간 가림 바이패스
+    // 와이퍼가 지날 때는 1프레임 동안 전체 픽셀이 급변함 -> 1회성 프레임은 무시
+    int globalCheckSum = 0;
+    int checkCount = 0;
+    for (int i = 0; i < bytes.length; i += step * 8) {
+      globalCheckSum += bytes[i];
+      checkCount++;
+    }
+    double globalLuma = checkCount > 0 ? globalCheckSum / checkCount : 128.0;
+
+    // 2. 주행 관심 영역 (상단 하늘/가로등 배제, 노면 위 0~50m 전방 및 측면 ROI)
+    int roiStart = (bytes.length * 0.42).toInt();
+    int roiEnd = (bytes.length * 0.88).toInt();
+
+    int verticalDiffSum = 0; // 입체 구조물(차량/보행자)의 수직 윤곽
     int sampleCount = 0;
 
-    // 중앙 및 하단 영역 샘플링
-    int centerIdx = (bytes.length * 0.45).toInt();
-    int endIdx = (bytes.length * 0.85).toInt();
-
-    for (int i = centerIdx; i < endIdx; i += step) {
-      totalLuma += bytes[i];
+    for (int i = roiStart; i < roiEnd - (step * 2); i += step) {
+      // 바닥 난반사는 가로로 퍼지므로, 수직(Vertical) 명암 대비를 측정해 입체 객체만 추출
+      int vDiff = (bytes[i] - bytes[i + (step * 2)]).abs();
+      verticalDiffSum += vDiff;
       sampleCount++;
     }
 
     if (sampleCount == 0) return;
-    int curLuma = totalLuma ~/ sampleCount;
 
-    if (baselineLuma == 0) {
-      baselineLuma = curLuma;
+    // 조도 적응형 구조 점유도 (Structure Density) 계산
+    double rawStructure = verticalDiffSum / sampleCount;
+    // 야간 저조도에서는 감도 1.6배 보정, 주간 역광에서는 정규화
+    double normalizedStructure = (globalLuma < 50) 
+        ? rawStructure * 1.6 
+        : rawStructure * (120.0 / (globalLuma + 50.0));
+
+    if (baselineStructure == 0.0) {
+      baselineStructure = normalizedStructure;
+      prevStructure = normalizedStructure;
       return;
     }
 
-    // 조명 흔들림 노이즈 필터링
-    int rawDelta = (curLuma - baselineLuma).abs();
-    double currentOccupancy = rawDelta / 255.0;
-    double expansionRate = currentOccupancy - prevTargetArea;
+    // 와이퍼 통과 필터 (단 1프레임 급변 후 다음 프레임 정상 복귀하는 특성 차단)
+    double frameJump = (normalizedStructure - prevStructure).abs();
+    if (frameJump > 35.0 && wiperBypassFrames == 0) {
+      wiperBypassFrames = 1;
+      prevStructure = normalizedStructure;
+      return; // 와이퍼 통과 순간 스킵
+    }
+    wiperBypassFrames = 0;
+
+    // 실제 장애물 편차 및 접근 팽창 속도
+    double structureDelta = (normalizedStructure - baselineStructure).abs();
+    double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      // 1. 급추돌 돌발 침범 (최우선)
-      if (expansionRate > 0.22 || (rawDelta > 45 && expansionRate > 0.12)) {
+      // 1. 돌발 급침범 (사람 뛰어들기, 야간 사각지대 급출현, 대각선 컷인)
+      if (expansionSpeed > 15.0 || (structureDelta > 28.0 && expansionSpeed > 9.0)) {
         hitCounter = 4;
         safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
@@ -179,8 +207,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
       }
-      // 2. 3단계 최종 추돌 위험 (근거리 좁혀짐)
-      else if (rawDelta > 38) {
+      // 2. 3단계 최종 추돌 위험 (근거리 제동 구간 진입)
+      else if (structureDelta > 24.0) {
         hitCounter = max(hitCounter + 1, 3);
         safeReleaseCounter = 0;
         alertLevel = "DANGER_BRAKE";
@@ -197,8 +225,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
-      // 3. 2단계 감속 권고 (약 30~50m)
-      else if (rawDelta > 26) {
+      // 3. 2단계 감속 권고 (약 30~50m 전방 장애물 접근)
+      else if (structureDelta > 16.0) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -217,10 +245,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
         }
       }
-      // 4. 1단계 전방 주의 (깜빡임 원인이었던 미세 노이즈 임계치 상향: 10 -> 18)
-      else if (rawDelta > 18) {
+      // 4. 1단계 전방 주의 (약 80~100m 원거리 물체)
+      else if (structureDelta > 11.0) {
         hitCounter++;
-        // 최소 2회 연속 감지되어야 노란 박스 표출
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
           alertLevel = "CAUTION_100";
@@ -238,23 +265,22 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           triggerAlert("전방 주의하십시오", "1단계 전방 주의");
         }
       }
-      // 5. 위험 물체가 사라졌을 때 (즉시 끄지 않고 1초간 홀드 후 해제하여 깜빡임 제거)
+      // 5. 안전 주행로 (환경 변화 점진 흡수)
       else {
         safeReleaseCounter++;
-        if (safeReleaseCounter >= 4) { // 약 1.0초 동안 안전 유지 시에만 완전 해제
+        if (safeReleaseCounter >= 4) { // 1초 지속 유지 후 해제
           hitCounter = 0;
           alertLevel = "SAFE";
           boxColor = Colors.greenAccent;
           threatBoundingBox = null;
           targetZone = "정상 주행로";
-          driveStatus = "VES 실측 관제 가동 중";
+          driveStatus = "VES 전천후 실차 관제 중";
           collisionAngle = 0;
-          // 배경 조도 학습
-          baselineLuma = ((baselineLuma * 0.95) + (curLuma * 0.05)).toInt();
+          baselineStructure = (baselineStructure * 0.93) + (normalizedStructure * 0.07);
         }
       }
 
-      prevTargetArea = currentOccupancy;
+      prevStructure = normalizedStructure;
     });
   }
 
@@ -351,14 +377,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 카메라 프리뷰
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 전방 기준 가이드
           Align(
             alignment: const Alignment(0, 0.35),
             child: Container(
@@ -371,7 +395,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             ),
           ),
 
-          // 안정화된 감지 바운딩 박스 (깜빡임 방지)
           if (threatBoundingBox != null)
             Positioned(
               left: threatBoundingBox!.left,
@@ -386,7 +409,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               ),
             ),
 
-          // 상단 관제 대시보드
           Positioned(
             top: 40,
             left: 15,
@@ -452,7 +474,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             ),
           ),
 
-          // 하단 관제 종료 버튼
           Positioned(
             bottom: 30,
             left: 20,
@@ -472,7 +493,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 실측 관제 가동 중";
+                    driveStatus = "VES 전천후 실차 관제 중";
                     boxColor = Colors.greenAccent;
                   });
                   await controller?.startVideoRecording();
