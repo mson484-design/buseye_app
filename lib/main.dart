@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -36,7 +35,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 실측 비전(YUV) 관제 중";
+  String driveStatus = "VES 실측 비전(YUV) 가동 중";
   Color boxColor = Colors.greenAccent;
   String alertLevel = "SAFE"; 
   String targetZone = "정상 주행로";
@@ -72,7 +71,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 실내/실차 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석");
+    _driveLogSession.add("엔진: 1D Flat Array 무중단 YUV 픽셀 스트리밍");
     _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -96,17 +95,23 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        // 문법 오류 100% 차단 (await 제거)
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
           if (now - lastFrameTime < 250) return; 
+          
           if (isAnalyzingFrame) return;
 
           lastFrameTime = now;
           isAnalyzingFrame = true;
-          processRealYuvFrame(image);
-          isAnalyzingFrame = false;
+          
+          try {
+            processRealYuvFrame(image);
+          } catch (e) {
+            debugPrint("YUV Frame Error: $e");
+          } finally {
+            isAnalyzingFrame = false; 
+          }
         });
 
         setState(() {
@@ -122,42 +127,28 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   void processRealYuvFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
-    final int width = image.width;
-    final int height = image.height;
-    final int rowStride = image.planes[0].bytesPerRow;
+    if (yPlane.length < 5000) return;
 
-    int step = 8; 
-    int roiStartY = (height * 0.40).toInt();
-    int roiEndY = (height * 0.90).toInt();
-    int roiStartX = (width * 0.20).toInt();
-    int roiEndX = (width * 0.80).toInt();
-
-    int edgeSum = 0;
-    int sampleCount = 0;
+    int step = 32; 
+    
     int globalSum = 0;
     int globalCount = 0;
-
-    for (int y = 0; y < height; y += step * 4) {
-      for (int x = 0; x < width; x += step * 4) {
-        int index = (y * rowStride) + x;
-        if (index < yPlane.length) {
-          globalSum += yPlane[index];
-          globalCount++;
-        }
-      }
+    for (int i = 0; i < yPlane.length; i += step * 4) {
+      globalSum += yPlane[i];
+      globalCount++;
     }
     double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
 
-    for (int y = roiStartY; y < roiEndY; y += step) {
-      for (int x = roiStartX; x < roiEndX; x += step) {
-        int currentIndex = (y * rowStride) + x;
-        int nextYIndex = ((y + step) * rowStride) + x;
-        if (nextYIndex < yPlane.length) {
-          int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
-          edgeSum += diff;
-          sampleCount++;
-        }
-      }
+    int roiStart = (yPlane.length * 0.40).toInt();
+    int roiEnd = (yPlane.length * 0.90).toInt();
+    
+    int edgeSum = 0;
+    int sampleCount = 0;
+
+    for (int i = roiStart; i < roiEnd - step; i += step) {
+      int diff = (yPlane[i] - yPlane[i + step]).abs();
+      edgeSum += diff;
+      sampleCount++;
     }
 
     if (sampleCount == 0) return;
@@ -177,7 +168,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      if (expansionSpeed > 6.0 || (structureDelta > 12.0 && expansionSpeed > 3.0)) {
+      if (expansionSpeed > 5.0 || (structureDelta > 10.0 && expansionSpeed > 2.5)) {
         hitCounter = 4;
         safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
@@ -186,13 +177,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         targetZone = "돌발 대각 급침범";
         driveStatus = "돌발 침범 즉시 브레이크!";
         threatBoundingBox = Rect.fromCenter(
-          center: Offset(size.width * 0.58, size.height * 0.55),
-          width: size.width * 0.52,
-          height: size.height * 0.45,
+          center: Offset(MediaQuery.of(context).size.width * 0.58, MediaQuery.of(context).size.height * 0.55),
+          width: MediaQuery.of(context).size.width * 0.52,
+          height: MediaQuery.of(context).size.height * 0.45,
         );
         triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
       }
-      else if (structureDelta > 9.0) {
+      else if (structureDelta > 7.5) {
         hitCounter = max(hitCounter + 1, 3);
         safeReleaseCounter = 0;
         alertLevel = "DANGER_BRAKE";
@@ -201,13 +192,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         targetZone = "근거리 위험 구역";
         driveStatus = "추돌 위험 즉시 브레이크!";
         threatBoundingBox = Rect.fromCenter(
-          center: Offset(size.width * 0.50, size.height * 0.52),
-          width: size.width * 0.46,
-          height: size.height * 0.42,
+          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.52),
+          width: MediaQuery.of(context).size.width * 0.46,
+          height: MediaQuery.of(context).size.height * 0.42,
         );
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
-      else if (structureDelta > 6.0) {
+      else if (structureDelta > 5.0) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -217,14 +208,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           targetZone = "전방 접근 구간";
           driveStatus = "전방 간격 확인 감속";
           threatBoundingBox = Rect.fromCenter(
-            center: Offset(size.width * 0.50, size.height * 0.45),
-            width: size.width * 0.35,
-            height: size.height * 0.30,
+            center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.45),
+            width: MediaQuery.of(context).size.width * 0.35,
+            height: MediaQuery.of(context).size.height * 0.30,
           );
           triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
         }
       }
-      else if (structureDelta > 3.5) {
+      else if (structureDelta > 3.0) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -234,9 +225,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           targetZone = "전방 감지 구역";
           driveStatus = "전방 주의 확인";
           threatBoundingBox = Rect.fromCenter(
-            center: Offset(size.width * 0.50, size.height * 0.42),
-            width: size.width * 0.28,
-            height: size.height * 0.24,
+            center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.42),
+            width: MediaQuery.of(context).size.width * 0.28,
+            height: MediaQuery.of(context).size.height * 0.24,
           );
           triggerAlert("전방 주의하십시오", "1단계 전방 주의");
         }
@@ -249,7 +240,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           boxColor = Colors.greenAccent;
           threatBoundingBox = null;
           targetZone = "정상 주행로";
-          driveStatus = "VES 실측 비전(YUV) 관제 중";
+          driveStatus = "VES 실측 비전(YUV) 가동 중";
           collisionAngle = 0;
           baselineStructure = (baselineStructure * 0.90) + (normalizedStructure * 0.10);
         }
@@ -279,18 +270,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     try {
       setState(() { saveStatusMsg = "EDR 텍스트 로그 저장 중..."; });
       
-      // 문법 오류 원인이었던 await 완전히 삭제
-      controller!.stopImageStream();
+      try {
+        await controller!.stopImageStream();
+      } catch (e) {}
+      
       setState(() { isStreaming = false; });
-
-      if (kIsWeb) {
-        setState(() {
-          saveStatusMsg = "웹 환경에서는 EDR 저장이 지원되지 않습니다.";
-          driveStatus = "관제 종료";
-          boxColor = Colors.grey;
-        });
-        return;
-      }
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
@@ -390,20 +374,26 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 실측 비전(YUV) 관제 중";
+                    driveStatus = "VES 실측 비전(YUV) 가동 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
-                    // await 완전히 삭제
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
                       if (now - lastFrameTime < 250) return;
                       if (isAnalyzingFrame) return;
+                      
                       lastFrameTime = now;
                       isAnalyzingFrame = true;
-                      processRealYuvFrame(image);
-                      isAnalyzingFrame = false;
+                      
+                      try {
+                        processRealYuvFrame(image);
+                      } catch (e) {
+                        debugPrint("Error: $e");
+                      } finally {
+                        isAnalyzingFrame = false;
+                      }
                     });
                   }
                   setState(() { isStreaming = true; saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중"; });
