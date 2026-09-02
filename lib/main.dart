@@ -33,7 +33,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
-  bool isRecordingVideo = false;
+  bool isStreaming = false;
 
   String driveStatus = "VES 실측 비전(YUV) 관제 중";
   Color boxColor = Colors.greenAccent;
@@ -53,7 +53,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   int eventSaveCount = 0;
   String saveStatusMsg = "대기 중";
 
-  // YUV 픽셀 기반 적응형 변수
+  // YUV 픽셀 기반 변수
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
   int hitCounter = 0;
@@ -72,7 +72,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 실내/실차 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 직결");
+    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석 (MP4 임시 비활성화)");
     _driveLogSession.add("--------------------------------------------------");
   }
 
@@ -95,11 +95,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        await controller!.startVideoRecording(onAvailable: (CameraImage image) {
+        // 문법 오류 해결: startImageStream 단독 사용
+        await controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 250) return;
+          if (now - lastFrameTime < 250) return; // 초당 4프레임 분석
           
           if (isAnalyzingFrame) return;
 
@@ -110,8 +111,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         });
 
         setState(() {
-          isRecordingVideo = true;
-          saveStatusMsg = "주행 영상(MP4) 및 픽셀 동시 분석 중";
+          isStreaming = true;
+          saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중";
         });
 
       } catch (e) {
@@ -120,6 +121,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
+  // YUV 픽셀 직접 분석 로직
   void processRealYuvFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
@@ -287,19 +289,17 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  Future<void> stopAndSaveVideoToMybox() async {
-    if (controller == null || !controller!.value.isRecordingVideo) return;
+  Future<void> stopAndSaveEDRLog() async {
+    if (controller == null || !isStreaming) return;
     try {
-      setState(() { saveStatusMsg = "동영상 및 EDR 로그 저장 중..."; });
-      final XFile rawVideoFile = await controller!.stopVideoRecording();
-      setState(() { isRecordingVideo = false; });
+      setState(() { saveStatusMsg = "EDR 텍스트 로그 저장 중..."; });
+      
+      await controller!.stopImageStream();
+      setState(() { isStreaming = false; });
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
-
-      final String finalVideoPath = '${targetDir.path}/VES_DriveVideo_$timestamp.mp4';
-      await File(rawVideoFile.path).copy(finalVideoPath);
 
       final logFile = File('${targetDir.path}/VES_EDR_Report_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
@@ -308,8 +308,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        saveStatusMsg = "MP4 및 EDR 저장 완료";
-        driveStatus = "관제 및 녹화 종료";
+        saveStatusMsg = "EDR 저장 완료 (MP4 미포함)";
+        driveStatus = "관제 종료";
         boxColor = Colors.grey;
       });
     } catch (e) {
@@ -319,8 +319,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   @override
   void dispose() {
-    if (controller != null && controller!.value.isRecordingVideo) {
-      controller!.stopVideoRecording();
+    if (controller != null && isStreaming) {
+      controller!.stopImageStream();
     }
     controller?.dispose();
     flutterTts.stop();
@@ -363,8 +363,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     children: [
                       Row(
                         children: [
-                          if (isRecordingVideo) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
-                          Text("속도계 제외 (방안 테스트용)", style: const TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                          if (isStreaming) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
+                          Text("YUV 픽셀 실측 엔진 가동", style: const TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
@@ -391,14 +391,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               onPressed: () async {
                 if (isRunning) {
                   setState(() { isRunning = false; });
-                  await stopAndSaveVideoToMybox();
+                  await stopAndSaveEDRLog();
                 } else {
                   setState(() {
                     isRunning = true;
                     driveStatus = "VES 실측 비전(YUV) 관제 중";
                     boxColor = Colors.greenAccent;
                   });
-                  await controller?.startVideoRecording(onAvailable: (CameraImage image) {
+                  await controller?.startImageStream((CameraImage image) {
                     if (!isRunning) return;
                     final int now = DateTime.now().millisecondsSinceEpoch;
                     if (now - lastFrameTime < 250) return;
@@ -408,10 +408,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     processRealYuvFrame(image);
                     isAnalyzingFrame = false;
                   });
-                  setState(() { isRecordingVideo = true; saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중"; });
+                  setState(() { isStreaming = true; saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중"; });
                 }
               },
-              child: Text(isRunning ? "■ 주행 관제 종료 (MP4 + EDR 저장)" : "▶ 관제 및 녹화 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+              child: Text(isRunning ? "■ 관제 종료 (EDR 로그 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
