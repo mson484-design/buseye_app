@@ -72,7 +72,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 실내/실차 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석 (MP4 임시 비활성화)");
+    _driveLogSession.add("엔진: YUV420 순수 픽셀(Raw) 스트리밍 분석 (시뮬레이션 배제)");
+    _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
     _driveLogSession.add("--------------------------------------------------");
   }
 
@@ -95,12 +96,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         if (!mounted) return;
         setState(() {});
 
-        // 문법 오류 해결: startImageStream 단독 사용
         await controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 250) return; // 초당 4프레임 분석
+          if (now - lastFrameTime < 250) return; 
           
           if (isAnalyzingFrame) return;
 
@@ -121,7 +121,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  // YUV 픽셀 직접 분석 로직
   void processRealYuvFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
@@ -298,6 +297,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       setState(() { isStreaming = false; });
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
+      // 마이박스 연동을 위해 Camera 폴더에 직접 저장
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
@@ -308,7 +308,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        saveStatusMsg = "EDR 저장 완료 (MP4 미포함)";
+        saveStatusMsg = "EDR 마이박스 연동 경로 저장 완료";
         driveStatus = "관제 종료";
         boxColor = Colors.grey;
       });
@@ -364,7 +364,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       Row(
                         children: [
                           if (isStreaming) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
-                          Text("YUV 픽셀 실측 엔진 가동", style: const TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                          const Text("YUV 비전 센서 (마이박스 연동)", style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
@@ -398,20 +398,22 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     driveStatus = "VES 실측 비전(YUV) 관제 중";
                     boxColor = Colors.greenAccent;
                   });
-                  await controller?.startImageStream((CameraImage image) {
-                    if (!isRunning) return;
-                    final int now = DateTime.now().millisecondsSinceEpoch;
-                    if (now - lastFrameTime < 250) return;
-                    if (isAnalyzingFrame) return;
-                    lastFrameTime = now;
-                    isAnalyzingFrame = true;
-                    processRealYuvFrame(image);
-                    isAnalyzingFrame = false;
-                  });
+                  if (controller != null) {
+                    await controller!.startImageStream((CameraImage image) {
+                      if (!isRunning) return;
+                      final int now = DateTime.now().millisecondsSinceEpoch;
+                      if (now - lastFrameTime < 250) return;
+                      if (isAnalyzingFrame) return;
+                      lastFrameTime = now;
+                      isAnalyzingFrame = true;
+                      processRealYuvFrame(image);
+                      isAnalyzingFrame = false;
+                    });
+                  }
                   setState(() { isStreaming = true; saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중"; });
                 }
               },
-              child: Text(isRunning ? "■ 관제 종료 (EDR 로그 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+              child: Text(isRunning ? "■ 관제 종료 (EDR 마이박스 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
