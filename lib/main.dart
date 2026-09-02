@@ -35,13 +35,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isRecordingVideo = false;
 
-  // 실차 실제 GPS 속도 (시뮬레이션 배제)
-  double actualSpeedKmh = 0.0;
   String currentMode = "실시간 차로 관제 모드";
-
-  String driveStatus = "VES 실차 주행 관제 중";
+  String driveStatus = "VES 실측 관제 가동 중";
   Color boxColor = Colors.greenAccent;
-  String alertLevel = "SAFE"; // SAFE, CAUTION_100, WARNING_50, DANGER_BRAKE, CRITICAL_CUTIN
+  String alertLevel = "SAFE"; 
   String targetZone = "정상 주행로";
 
   Rect? threatBoundingBox;
@@ -57,9 +54,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   int eventSaveCount = 0;
   String saveStatusMsg = "대기 중";
 
-  // 이전 프레임 분석 데이터
+  // 플리커 및 깜빡임 방지 변수 (Hysteresis Filter)
   int baselineLuma = 0;
   double prevTargetArea = 0.0;
+  int hitCounter = 0; // 연속 감지 카운터
+  int safeReleaseCounter = 0; // 안전 복귀 지연 카운터
 
   @override
   void initState() {
@@ -72,9 +71,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES (Vehicle Eye System) 실차 도로 EDR 관제 ===");
+    _driveLogSession.add("=== VES (Vehicle Eye System) 실측 비전 EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("기준: 3단계 제동 경보 (전방주의 -> 감속 -> 즉시 브레이크) + 돌발 즉시 발령");
+    _driveLogSession.add("안정화 필터: 깜빡임 방지(Hysteresis) 및 3단계 제동 경보 적용");
     _driveLogSession.add("--------------------------------------------------");
   }
 
@@ -103,15 +102,15 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           saveStatusMsg = "주행 영상(MP4) 실시간 녹화 중";
         });
 
-        startRealHardwareVision();
+        startStabilizedVisionLoop();
       } catch (e) {
         debugPrint("Camera Start Error: $e");
       }
     }
   }
 
-  // 0.25초마다 실제 렌즈 프레임 실측 스캔
-  void startRealHardwareVision() {
+  // 0.25초마다 실제 렌즈 프레임 스캔
+  void startStabilizedVisionLoop() {
     visionScanTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) async {
       if (!isRunning || controller == null || !controller!.value.isInitialized) return;
       if (isAnalyzingFrame) return;
@@ -122,25 +121,25 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         final Uint8List bytes = await snapshot.readAsBytes();
         await File(snapshot.path).delete();
 
-        processHardwareFrame(bytes);
+        processStabilizedFrame(bytes);
       } catch (e) {
-        // 비디오 녹화 경합 프레임 건너뜀
+        // 녹화 경합 프레임 건너뜀
       } finally {
         isAnalyzingFrame = false;
       }
     });
   }
 
-  // 실제 바이트 데이터 기반 3단계 경보 및 돌발 진입 실측 판정
-  void processHardwareFrame(Uint8List bytes) {
+  void processStabilizedFrame(Uint8List bytes) {
     if (bytes.length < 5000) return;
 
     final size = MediaQuery.of(context).size;
-    int step = 60;
+    int step = 70;
     int totalLuma = 0;
     int sampleCount = 0;
 
-    int centerIdx = (bytes.length * 0.40).toInt();
+    // 중앙 및 하단 영역 샘플링
+    int centerIdx = (bytes.length * 0.45).toInt();
     int endIdx = (bytes.length * 0.85).toInt();
 
     for (int i = centerIdx; i < endIdx; i += step) {
@@ -156,30 +155,34 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       return;
     }
 
-    // 실제 화면 편차 및 면적 확장율 계산
-    int delta = (curLuma - baselineLuma).abs();
-    double currentOccupancy = delta / 255.0; // 0.0 ~ 1.0 점유율
-    double expansionRate = currentOccupancy - prevTargetArea; // 접근 팽창 속도
+    // 조명 흔들림 노이즈 필터링
+    int rawDelta = (curLuma - baselineLuma).abs();
+    double currentOccupancy = rawDelta / 255.0;
+    double expansionRate = currentOccupancy - prevTargetArea;
 
     setState(() {
-      // 1. 돌발 급추돌 진입 (대각선 뛰어들기 / 컷인): 0.2초 내 급격한 면적 확장
-      if (expansionRate > 0.18 || (delta > 35 && expansionRate > 0.10)) {
+      // 1. 급추돌 돌발 침범 (최우선)
+      if (expansionRate > 0.22 || (rawDelta > 45 && expansionRate > 0.12)) {
+        hitCounter = 4;
+        safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
         boxColor = Colors.redAccent;
-        collisionAngle = 42;
+        collisionAngle = 45;
         targetZone = "돌발 대각 급침범";
         driveStatus = "돌발 침범 즉시 브레이크!";
 
         threatBoundingBox = Rect.fromCenter(
           center: Offset(size.width * 0.58, size.height * 0.55),
-          width: size.width * 0.50,
+          width: size.width * 0.52,
           height: size.height * 0.45,
         );
 
         triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
       }
-      // 2. 3단계 최종 추돌 위험 (근거리 좁혀짐): 고밀도 점유
-      else if (delta > 28) {
+      // 2. 3단계 최종 추돌 위험 (근거리 좁혀짐)
+      else if (rawDelta > 38) {
+        hitCounter = max(hitCounter + 1, 3);
+        safeReleaseCounter = 0;
         alertLevel = "DANGER_BRAKE";
         boxColor = Colors.red;
         collisionAngle = 5;
@@ -188,53 +191,67 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         threatBoundingBox = Rect.fromCenter(
           center: Offset(size.width * 0.50, size.height * 0.52),
-          width: size.width * 0.45,
-          height: size.height * 0.40,
+          width: size.width * 0.46,
+          height: size.height * 0.42,
         );
 
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
-      // 3. 2단계 감속 경고 (약 30~50m 상당 접근): 중간 밀도
-      else if (delta > 18) {
-        alertLevel = "WARNING_50";
-        boxColor = Colors.orangeAccent;
-        collisionAngle = 2;
-        targetZone = "전방 접근 구간";
-        driveStatus = "전방 간격 확인 감속";
+      // 3. 2단계 감속 권고 (약 30~50m)
+      else if (rawDelta > 26) {
+        hitCounter++;
+        if (hitCounter >= 2) {
+          safeReleaseCounter = 0;
+          alertLevel = "WARNING_50";
+          boxColor = Colors.orangeAccent;
+          collisionAngle = 2;
+          targetZone = "전방 접근 구간";
+          driveStatus = "전방 간격 확인 감속";
 
-        threatBoundingBox = Rect.fromCenter(
-          center: Offset(size.width * 0.50, size.height * 0.45),
-          width: size.width * 0.35,
-          height: size.height * 0.30,
-        );
+          threatBoundingBox = Rect.fromCenter(
+            center: Offset(size.width * 0.50, size.height * 0.45),
+            width: size.width * 0.35,
+            height: size.height * 0.30,
+          );
 
-        triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
+          triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
+        }
       }
-      // 4. 1단계 전방 주의 (약 80~100m 상당 물체 감지): 미세 밀도
-      else if (delta > 10) {
-        alertLevel = "CAUTION_100";
-        boxColor = Colors.yellowAccent;
-        collisionAngle = 0;
-        targetZone = "원거리 장애물";
-        driveStatus = "전방 주의 확인";
+      // 4. 1단계 전방 주의 (깜빡임 원인이었던 미세 노이즈 임계치 상향: 10 -> 18)
+      else if (rawDelta > 18) {
+        hitCounter++;
+        // 최소 2회 연속 감지되어야 노란 박스 표출
+        if (hitCounter >= 2) {
+          safeReleaseCounter = 0;
+          alertLevel = "CAUTION_100";
+          boxColor = Colors.yellowAccent;
+          collisionAngle = 0;
+          targetZone = "전방 감지 구역";
+          driveStatus = "전방 주의 확인";
 
-        threatBoundingBox = Rect.fromCenter(
-          center: Offset(size.width * 0.50, size.height * 0.40),
-          width: size.width * 0.25,
-          height: size.height * 0.22,
-        );
+          threatBoundingBox = Rect.fromCenter(
+            center: Offset(size.width * 0.50, size.height * 0.42),
+            width: size.width * 0.28,
+            height: size.height * 0.24,
+          );
 
-        triggerAlert("전방 주의하십시오", "1단계 전방 주의");
+          triggerAlert("전방 주의하십시오", "1단계 전방 주의");
+        }
       }
-      // 5. 정상 주행로
+      // 5. 위험 물체가 사라졌을 때 (즉시 끄지 않고 1초간 홀드 후 해제하여 깜빡임 제거)
       else {
-        alertLevel = "SAFE";
-        boxColor = Colors.greenAccent;
-        threatBoundingBox = null;
-        targetZone = "정상 주행로";
-        driveStatus = "VES 실차 주행 관제 중";
-        collisionAngle = 0;
-        baselineLuma = ((baselineLuma * 0.92) + (curLuma * 0.08)).toInt();
+        safeReleaseCounter++;
+        if (safeReleaseCounter >= 4) { // 약 1.0초 동안 안전 유지 시에만 완전 해제
+          hitCounter = 0;
+          alertLevel = "SAFE";
+          boxColor = Colors.greenAccent;
+          threatBoundingBox = null;
+          targetZone = "정상 주행로";
+          driveStatus = "VES 실측 관제 가동 중";
+          collisionAngle = 0;
+          // 배경 조도 학습
+          baselineLuma = ((baselineLuma * 0.95) + (curLuma * 0.05)).toInt();
+        }
       }
 
       prevTargetArea = currentOccupancy;
@@ -334,14 +351,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 실제 카메라 뷰파인더
+          // 카메라 프리뷰
           SizedBox(
             width: size.width,
             height: size.height,
             child: CameraPreview(controller!),
           ),
 
-          // 전방 기준 주행 가이드
+          // 전방 기준 가이드
           Align(
             alignment: const Alignment(0, 0.35),
             child: Container(
@@ -354,7 +371,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             ),
           ),
 
-          // 단계별 실측 바운딩 박스
+          // 안정화된 감지 바운딩 박스 (깜빡임 방지)
           if (threatBoundingBox != null)
             Positioned(
               left: threatBoundingBox!.left,
@@ -435,7 +452,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
             ),
           ),
 
-          // 하단 주행 관제 종료 버튼
+          // 하단 관제 종료 버튼
           Positioned(
             bottom: 30,
             left: 20,
@@ -455,7 +472,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 실차 주행 관제 중";
+                    driveStatus = "VES 실측 관제 가동 중";
                     boxColor = Colors.greenAccent;
                   });
                   await controller?.startVideoRecording();
