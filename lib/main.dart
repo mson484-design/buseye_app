@@ -35,7 +35,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 실측 비전(YUV) 가동 중";
+  String driveStatus = "VES 현장 맞춤형 MVP 관제 중";
   Color boxColor = Colors.greenAccent;
   String alertLevel = "SAFE"; 
   String targetZone = "정상 주행로";
@@ -55,6 +55,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
+  double prevGlobalLuma = 128.0; // 야간 조도 급변 감지용
   int hitCounter = 0;
   int safeReleaseCounter = 0;
 
@@ -69,9 +70,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 실내/실차 비전 EDR 관제 ===");
+    _driveLogSession.add("=== VES 현장 맞춤형 MVP EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: 1D Flat Array 무중단 YUV 픽셀 스트리밍");
+    _driveLogSession.add("엔진: 중앙 ROI + 팽창 벡터 필터 + 야간 조도 노이즈 차단");
     _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -116,7 +117,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         setState(() {
           isStreaming = true;
-          saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중";
+          saveStatusMsg = "야간 노이즈 차단 비전 엔진 가동 중";
         });
 
       } catch (e) {
@@ -127,28 +128,58 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   void processRealYuvFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
-    if (yPlane.length < 5000) return;
+    final int width = image.width;
+    final int height = image.height;
+    final int rowStride = image.planes[0].bytesPerRow;
 
-    int step = 32; 
-    
+    int step = 16; 
+
+    // 중앙 차선(38% ~ 62%) 집중 감지 영역
+    int roiStartY = (height * 0.40).toInt();
+    int roiEndY = (height * 0.85).toInt();
+    int roiStartX = (width * 0.38).toInt();
+    int roiEndX = (width * 0.62).toInt();
+
+    int edgeSum = 0;
+    int sampleCount = 0;
     int globalSum = 0;
     int globalCount = 0;
-    for (int i = 0; i < yPlane.length; i += step * 4) {
-      globalSum += yPlane[i];
-      globalCount++;
+    int pedestrianSpikeCount = 0;
+
+    for (int y = 0; y < height; y += step * 4) {
+      for (int x = 0; x < width; x += step * 4) {
+        int index = (y * rowStride) + x;
+        if (index < yPlane.length) {
+          globalSum += yPlane[index];
+          globalCount++;
+        }
+      }
     }
     double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
 
-    int roiStart = (yPlane.length * 0.40).toInt();
-    int roiEnd = (yPlane.length * 0.90).toInt();
-    
-    int edgeSum = 0;
-    int sampleCount = 0;
+    // [야간 대응] 맞은편 차량 헤드라이트나 가로등으로 인한 급격한 조도 변화(Flash) 필터링
+    double lumaDelta = (globalLuma - prevGlobalLuma).abs();
+    prevGlobalLuma = globalLuma;
+    if (lumaDelta > 35.0) {
+      // 빛 번짐/플래시 발생 시 오작동 방지를 위해 이번 프레임 분석 스킵
+      return;
+    }
 
-    for (int i = roiStart; i < roiEnd - step; i += step) {
-      int diff = (yPlane[i] - yPlane[i + step]).abs();
-      edgeSum += diff;
-      sampleCount++;
+    for (int y = roiStartY; y < roiEndY; y += step) {
+      for (int x = roiStartX; x < roiEndX; x += step) {
+        int currentIndex = (y * rowStride) + x;
+        int nextYIndex = ((y + step) * rowStride) + x;
+
+        if (nextYIndex < yPlane.length) {
+          int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
+          edgeSum += diff;
+          sampleCount++;
+
+          if (y > (height * 0.60) && diff > 45) {
+            pedestrianSpikeCount++;
+          }
+        }
+      }
     }
 
     if (sampleCount == 0) return;
@@ -168,37 +199,52 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      if (expansionSpeed > 5.0 || (structureDelta > 10.0 && expansionSpeed > 2.5)) {
+      if (pedestrianSpikeCount > 8) {
+        hitCounter = 5;
+        safeReleaseCounter = 0;
+        alertLevel = "PEDESTRIAN_EMERGENCY";
+        boxColor = Colors.purpleAccent;
+        collisionAngle = 0;
+        targetZone = "전방 보행자 돌발 침범";
+        driveStatus = "보행자 주의 즉시 정지!";
+        threatBoundingBox = Rect.fromCenter(
+          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.60),
+          width: MediaQuery.of(context).size.width * 0.45,
+          height: MediaQuery.of(context).size.height * 0.40,
+        );
+        triggerAlert("보행자 주의 즉시 정지하십시오", "보행자 돌발 감지", isUrgentOverride: true);
+      }
+      else if (expansionSpeed > 6.0 || (structureDelta > 13.0 && expansionSpeed > 2.5)) {
         hitCounter = 4;
         safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
         boxColor = Colors.redAccent;
         collisionAngle = 45;
-        targetZone = "돌발 대각 급침범";
-        driveStatus = "돌발 침범 즉시 브레이크!";
+        targetZone = "전방 돌발 급접근";
+        driveStatus = "돌발 위험 즉시 브레이크!";
         threatBoundingBox = Rect.fromCenter(
-          center: Offset(MediaQuery.of(context).size.width * 0.58, MediaQuery.of(context).size.height * 0.55),
-          width: MediaQuery.of(context).size.width * 0.52,
-          height: MediaQuery.of(context).size.height * 0.45,
+          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.52),
+          width: MediaQuery.of(context).size.width * 0.38,
+          height: MediaQuery.of(context).size.height * 0.32,
         );
-        triggerAlert("위험 돌발 침범 즉시 브레이크", "돌발 급침범", isUrgentOverride: true);
+        triggerAlert("위험 돌발 급접근 즉시 브레이크", "돌발 급접근", isUrgentOverride: true);
       }
-      else if (structureDelta > 7.5) {
+      else if (structureDelta > 9.5 && expansionSpeed > 1.8) {
         hitCounter = max(hitCounter + 1, 3);
         safeReleaseCounter = 0;
         alertLevel = "DANGER_BRAKE";
         boxColor = Colors.red;
         collisionAngle = 5;
-        targetZone = "근거리 위험 구역";
+        targetZone = "정면 근거리 위험";
         driveStatus = "추돌 위험 즉시 브레이크!";
         threatBoundingBox = Rect.fromCenter(
-          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.52),
-          width: MediaQuery.of(context).size.width * 0.46,
-          height: MediaQuery.of(context).size.height * 0.42,
+          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.50),
+          width: MediaQuery.of(context).size.width * 0.32,
+          height: MediaQuery.of(context).size.height * 0.28,
         );
         triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
       }
-      else if (structureDelta > 5.0) {
+      else if (structureDelta > 6.5 && expansionSpeed > 1.2) {
         hitCounter++;
         if (hitCounter >= 2) {
           safeReleaseCounter = 0;
@@ -209,27 +255,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           driveStatus = "전방 간격 확인 감속";
           threatBoundingBox = Rect.fromCenter(
             center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.45),
-            width: MediaQuery.of(context).size.width * 0.35,
-            height: MediaQuery.of(context).size.height * 0.30,
+            width: MediaQuery.of(context).size.width * 0.25,
+            height: MediaQuery.of(context).size.height * 0.22,
           );
           triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
-        }
-      }
-      else if (structureDelta > 3.0) {
-        hitCounter++;
-        if (hitCounter >= 2) {
-          safeReleaseCounter = 0;
-          alertLevel = "CAUTION_100";
-          boxColor = Colors.yellowAccent;
-          collisionAngle = 0;
-          targetZone = "전방 감지 구역";
-          driveStatus = "전방 주의 확인";
-          threatBoundingBox = Rect.fromCenter(
-            center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.42),
-            width: MediaQuery.of(context).size.width * 0.28,
-            height: MediaQuery.of(context).size.height * 0.24,
-          );
-          triggerAlert("전방 주의하십시오", "1단계 전방 주의");
         }
       }
       else {
@@ -240,9 +269,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           boxColor = Colors.greenAccent;
           threatBoundingBox = null;
           targetZone = "정상 주행로";
-          driveStatus = "VES 실측 비전(YUV) 가동 중";
+          driveStatus = "VES 현장 맞춤형 MVP 관제 중";
           collisionAngle = 0;
-          baselineStructure = (baselineStructure * 0.90) + (normalizedStructure * 0.10);
+          baselineStructure = (baselineStructure * 0.92) + (normalizedStructure * 0.08);
         }
       }
       prevStructure = normalizedStructure;
@@ -320,8 +349,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           Align(
             alignment: const Alignment(0, 0.35),
             child: Container(
-              width: size.width * 0.45, height: size.height * 0.50,
-              decoration: BoxDecoration(border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0), color: boxColor.withOpacity(0.03)),
+              width: size.width * 0.24, height: size.height * 0.45,
+              decoration: BoxDecoration(border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0), color: boxColor.withOpacity(0.02)),
             ),
           ),
           if (threatBoundingBox != null)
@@ -343,7 +372,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       Row(
                         children: [
                           if (isStreaming) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
-                          const Text("YUV 비전 센서 (마이박스 연동)", style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                          const Text("현장 맞춤형 MVP 비전 엔진", style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
@@ -374,7 +403,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 실측 비전(YUV) 가동 중";
+                    driveStatus = "VES 현장 맞춤형 MVP 관제 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
@@ -396,7 +425,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       }
                     });
                   }
-                  setState(() { isStreaming = true; saveStatusMsg = "실시간 YUV 픽셀 분석 가동 중"; });
+                  setState(() { isStreaming = true; saveStatusMsg = "현장 맞춤형 비전 엔진 가동 중"; });
                 }
               },
               child: Text(isRunning ? "■ 관제 종료 (EDR 마이박스 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
