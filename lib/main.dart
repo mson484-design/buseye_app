@@ -72,7 +72,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 현장 맞춤형 MVP EDR 관제 ===");
     _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: 중앙 ROI + 팽창 벡터 필터 + 야간 조도 노이즈 차단");
+    _driveLogSession.add("엔진: 중앙 ROI + 다가섬 감지 방향 필터 + 야간 조도 노이즈 차단");
     _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -117,7 +117,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         setState(() {
           isStreaming = true;
-          saveStatusMsg = "야간 노이즈 차단 비전 엔진 가동 중";
+          saveStatusMsg = "방향성 감지 비전 엔진 가동 중";
         });
 
       } catch (e) {
@@ -189,7 +189,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       return;
     }
 
-    double structureDelta = (normalizedStructure - baselineStructure).abs();
+    // 멀어질 때(값이 떨어질 때)는 무시하고, 오직 전방으로 다가와서 값이 치솟을 때만 인정
+    double structureDelta = normalizedStructure - baselineStructure;
+    if (structureDelta < 0) structureDelta = 0.0;
+    
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
@@ -404,7 +407,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       }
                     });
                   }
-                  setState(() { isStreaming = true; saveStatusMsg = "현장 맞춤형 비전 엔진 가동 중"; });
+                  setState(() { isStreaming = true; saveStatusMsg = "방향성 감지 비전 엔진 가동 중"; });
                 }
               },
               child: Text(isRunning ? "■ 관제 종료 (EDR 마이박스 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
