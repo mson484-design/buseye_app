@@ -55,7 +55,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
-  double prevGlobalLuma = 128.0; // 야간 조도 급변 감지용
+  double prevGlobalLuma = 128.0; 
   int hitCounter = 0;
   int safeReleaseCounter = 0;
 
@@ -144,7 +144,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     int sampleCount = 0;
     int globalSum = 0;
     int globalCount = 0;
-    int pedestrianSpikeCount = 0;
 
     for (int y = 0; y < height; y += step * 4) {
       for (int x = 0; x < width; x += step * 4) {
@@ -157,11 +156,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
     double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
 
-    // [야간 대응] 맞은편 차량 헤드라이트나 가로등으로 인한 급격한 조도 변화(Flash) 필터링
+    // 야간 조도 급변(헤드라이트 플래시) 필터링
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
     if (lumaDelta > 35.0) {
-      // 빛 번짐/플래시 발생 시 오작동 방지를 위해 이번 프레임 분석 스킵
       return;
     }
 
@@ -174,10 +172,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
           edgeSum += diff;
           sampleCount++;
-
-          if (y > (height * 0.60) && diff > 45) {
-            pedestrianSpikeCount++;
-          }
         }
       }
     }
@@ -199,22 +193,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      if (pedestrianSpikeCount > 8) {
-        hitCounter = 5;
-        safeReleaseCounter = 0;
-        alertLevel = "PEDESTRIAN_EMERGENCY";
-        boxColor = Colors.purpleAccent;
-        collisionAngle = 0;
-        targetZone = "전방 보행자 돌발 침범";
-        driveStatus = "보행자 주의 즉시 정지!";
-        threatBoundingBox = Rect.fromCenter(
-          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.60),
-          width: MediaQuery.of(context).size.width * 0.45,
-          height: MediaQuery.of(context).size.height * 0.40,
-        );
-        triggerAlert("보행자 주의 즉시 정지하십시오", "보행자 돌발 감지", isUrgentOverride: true);
-      }
-      else if (expansionSpeed > 6.0 || (structureDelta > 13.0 && expansionSpeed > 2.5)) {
+      if (expansionSpeed > 6.0 || (structureDelta > 13.0 && expansionSpeed > 2.5)) {
         hitCounter = 4;
         safeReleaseCounter = 0;
         alertLevel = "CRITICAL_CUTIN";
