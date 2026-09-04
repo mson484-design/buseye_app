@@ -35,13 +35,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 현장 맞춤형 MVP 관제 중";
+  // 기사님 철학에 맞춘 차분한 관제 상태 메시지
+  String driveStatus = "VES 사각지대 안심 관제 중";
   Color boxColor = Colors.greenAccent;
   String alertLevel = "SAFE"; 
-  String targetZone = "정상 주행로";
+  String targetZone = "정상 주행 시야";
 
   Rect? threatBoundingBox;
-  int collisionAngle = 0;
 
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
@@ -56,8 +56,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
   double prevGlobalLuma = 128.0; 
-  int hitCounter = 0;
-  int safeReleaseCounter = 0;
 
   @override
   void initState() {
@@ -70,17 +68,17 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewDriveSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 현장 맞춤형 MVP EDR 관제 ===");
-    _driveLogSession.add("기록 시작: ${now.toIso8601String()}");
-    _driveLogSession.add("엔진: 중앙 ROI + 다가섬 감지 방향 필터 + 야간 조도 노이즈 차단");
-    _driveLogSession.add("저장소: 네이버 MYBOX 연동 (DCIM/Camera)");
+    _driveLogSession.add("=== VES 안심 운행 보조 리포트 ===");
+    _driveLogSession.add("시작: ${now.toIso8601String()}");
+    _driveLogSession.add("모드: 사각지대 및 돌출 장애물 부드러운 주의 안내");
     _driveLogSession.add("--------------------------------------------------");
   }
 
   void initTTS() async {
     await flutterTts.setLanguage("ko-KR");
-    await flutterTts.setSpeechRate(0.58);
-    await flutterTts.setVolume(1.0);
+    // 음성 톤을 더 차분하고 부드럽게 조절
+    await flutterTts.setSpeechRate(0.50);
+    await flutterTts.setVolume(0.9);
   }
 
   Future<void> initCameraAndStart() async {
@@ -99,7 +97,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 250) return; 
+          if (now - lastFrameTime < 300) return; // 부하 방지용 주기 조절
           
           if (isAnalyzingFrame) return;
 
@@ -107,9 +105,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processRealYuvFrame(image);
+            processSoftSafetyFrame(image);
           } catch (e) {
-            debugPrint("YUV Frame Error: $e");
+            debugPrint("Frame Error: $e");
           } finally {
             isAnalyzingFrame = false; 
           }
@@ -117,7 +115,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
         setState(() {
           isStreaming = true;
-          saveStatusMsg = "방향성 감지 비전 엔진 가동 중";
+          saveStatusMsg = "사각지대 감시 필터 가동 중";
         });
 
       } catch (e) {
@@ -126,7 +124,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void processRealYuvFrame(CameraImage image) {
+  void processSoftSafetyFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -134,11 +132,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     int step = 16; 
 
-    // 중앙 차선(38% ~ 62%) 집중 감지 영역
-    int roiStartY = (height * 0.40).toInt();
-    int roiEndY = (height * 0.85).toInt();
-    int roiStartX = (width * 0.38).toInt();
-    int roiEndX = (width * 0.62).toInt();
+    // 지하 진출입부 및 전방 사각지대 집중 감시 구역 (중앙부)
+    int roiStartY = (height * 0.42).toInt();
+    int roiEndY = (height * 0.80).toInt();
+    int roiStartX = (width * 0.40).toInt();
+    int roiEndX = (width * 0.60).toInt();
 
     int edgeSum = 0;
     int sampleCount = 0;
@@ -156,12 +154,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
     double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
 
-    // 야간 조도 급변(헤드라이트 플래시) 필터링
+    // 야간 헤드라이트 플래시 노이즈 필터
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 35.0) {
-      return;
-    }
+    if (lumaDelta > 40.0) return;
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -179,9 +175,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     if (sampleCount == 0) return;
 
     double rawStructure = edgeSum / sampleCount;
-    double normalizedStructure = (globalLuma < 60) 
-        ? rawStructure * 1.5 
-        : rawStructure * (120.0 / (globalLuma + 50.0));
+    double normalizedStructure = rawStructure * (120.0 / (globalLuma + 50.0));
 
     if (baselineStructure == 0.0) {
       baselineStructure = normalizedStructure;
@@ -189,88 +183,51 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       return;
     }
 
-    // 멀어질 때(값이 떨어질 때)는 무시하고, 오직 전방으로 다가와서 값이 치솟을 때만 인정
+    // 전방으로 다가서는 변화량만 측정 (멀어지는 건 무시)
     double structureDelta = normalizedStructure - baselineStructure;
     if (structureDelta < 0) structureDelta = 0.0;
     
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      if (expansionSpeed > 6.0 || (structureDelta > 13.0 && expansionSpeed > 2.5)) {
-        hitCounter = 4;
-        safeReleaseCounter = 0;
-        alertLevel = "CRITICAL_CUTIN";
-        boxColor = Colors.redAccent;
-        collisionAngle = 45;
-        targetZone = "전방 돌발 급접근";
-        driveStatus = "돌발 위험 즉시 브레이크!";
-        threatBoundingBox = Rect.fromCenter(
-          center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.52),
-          width: MediaQuery.of(context).size.width * 0.38,
-          height: MediaQuery.of(context).size.height * 0.32,
-        );
-        triggerAlert("위험 돌발 급접근 즉시 브레이크", "돌발 급접근", isUrgentOverride: true);
-      }
-      else if (structureDelta > 9.5 && expansionSpeed > 1.8) {
-        hitCounter = max(hitCounter + 1, 3);
-        safeReleaseCounter = 0;
-        alertLevel = "DANGER_BRAKE";
-        boxColor = Colors.red;
-        collisionAngle = 5;
-        targetZone = "정면 근거리 위험";
-        driveStatus = "추돌 위험 즉시 브레이크!";
+      // [시나리오 반영] 급제동/빨간색 공포 경고 대신, '추돌 의심' 혹은 '사각지대 장애물' 발견 시 부드러운 주의 안내
+      if (expansionSpeed > 7.0 || structureDelta > 15.0) {
+        alertLevel = "CAUTION_NOTICE";
+        boxColor = Colors.orangeAccent; // 눈이 편안한 오렌지빛 안내
+        targetZone = "전방 사각지대 / 추돌 의심";
+        driveStatus = "전방 장애물 주의 안내";
         threatBoundingBox = Rect.fromCenter(
           center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.50),
-          width: MediaQuery.of(context).size.width * 0.32,
-          height: MediaQuery.of(context).size.height * 0.28,
+          width: MediaQuery.of(context).size.width * 0.28,
+          height: MediaQuery.of(context).size.height * 0.25,
         );
-        triggerAlert("추돌 위험 즉시 브레이크", "3단계 위험 제동");
-      }
-      else if (structureDelta > 6.5 && expansionSpeed > 1.2) {
-        hitCounter++;
-        if (hitCounter >= 2) {
-          safeReleaseCounter = 0;
-          alertLevel = "WARNING_50";
-          boxColor = Colors.orangeAccent;
-          collisionAngle = 2;
-          targetZone = "전방 접근 구간";
-          driveStatus = "전방 간격 확인 감속";
-          threatBoundingBox = Rect.fromCenter(
-            center: Offset(MediaQuery.of(context).size.width * 0.50, MediaQuery.of(context).size.height * 0.45),
-            width: MediaQuery.of(context).size.width * 0.25,
-            height: MediaQuery.of(context).size.height * 0.22,
-          );
-          triggerAlert("전방 간격 확인 감속하십시오", "2단계 감속 권고");
-        }
+        // 부드럽고 정중한 톤의 안내 멘트
+        triggerGentleAlert("전방에 주의가 필요합니다. 간격을 확인하세요.");
       }
       else {
-        safeReleaseCounter++;
-        if (safeReleaseCounter >= 4) {
-          hitCounter = 0;
-          alertLevel = "SAFE";
-          boxColor = Colors.greenAccent;
-          threatBoundingBox = null;
-          targetZone = "정상 주행로";
-          driveStatus = "VES 현장 맞춤형 MVP 관제 중";
-          collisionAngle = 0;
-          baselineStructure = (baselineStructure * 0.92) + (normalizedStructure * 0.08);
-        }
+        // 평상시 안정 상태
+        alertLevel = "SAFE";
+        boxColor = Colors.greenAccent;
+        threatBoundingBox = null;
+        targetZone = "정상 주행 시야";
+        driveStatus = "VES 사각지대 안심 관제 중";
+        baselineStructure = (baselineStructure * 0.95) + (normalizedStructure * 0.05);
       }
       prevStructure = normalizedStructure;
     });
   }
 
-  void triggerAlert(String speechText, String status, {bool isUrgentOverride = false}) {
+  void triggerGentleAlert(String speechText) {
     final now = DateTime.now();
-    int cooldownSec = isUrgentOverride ? 2 : 5;
-    if (isUrgentOverride || (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldownSec)) {
+    // 안내 멘트가 너무 자주 반복되지 않도록 8초 쿨다운 적용
+    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
       eventSaveCount++;
-      final logEntry = "[EDR #$eventSaveCount] ${now.toIso8601String()} | 단계: $alertLevel | 각도: ${collisionAngle}° | $status";
+      final logEntry = "[안내 #$eventSaveCount] ${now.toIso8601String()} | $speechText";
       _driveLogSession.add(logEntry);
-      Timer(Duration(seconds: cooldownSec), () {
+      Timer(const Duration(seconds: 8), () {
         isSpeechLocked = false;
       });
     }
@@ -279,7 +236,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   Future<void> stopAndSaveEDRLog() async {
     if (controller == null || !isStreaming) return;
     try {
-      setState(() { saveStatusMsg = "EDR 텍스트 로그 저장 중..."; });
+      setState(() { saveStatusMsg = "운행 리포트 저장 중..."; });
       
       try {
         await controller!.stopImageStream();
@@ -291,14 +248,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_EDR_Report_$timestamp.txt');
+      final logFile = File('${targetDir.path}/VES_Drive_Report_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 EDR 이벤트: $eventSaveCount건");
+      _driveLogSession.add("총 안내 횟수: $eventSaveCount건");
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        saveStatusMsg = "EDR 마이박스 연동 경로 저장 완료";
+        saveStatusMsg = "리포트 저장 완료";
         driveStatus = "관제 종료";
         boxColor = Colors.grey;
       });
@@ -328,17 +285,18 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       body: Stack(
         children: [
           SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
+          // 사각지대 전용 중앙 감시 박스
           Align(
             alignment: const Alignment(0, 0.35),
             child: Container(
-              width: size.width * 0.24, height: size.height * 0.45,
-              decoration: BoxDecoration(border: Border.all(color: boxColor.withOpacity(0.5), width: 2.0), color: boxColor.withOpacity(0.02)),
+              width: size.width * 0.22, height: size.height * 0.40,
+              decoration: BoxDecoration(border: Border.all(color: boxColor.withOpacity(0.6), width: 2.0), color: boxColor.withOpacity(0.02)),
             ),
           ),
           if (threatBoundingBox != null)
             Positioned(
               left: threatBoundingBox!.left, top: threatBoundingBox!.top, width: threatBoundingBox!.width, height: threatBoundingBox!.height,
-              child: Container(decoration: BoxDecoration(border: Border.all(color: boxColor, width: 3.5), color: boxColor.withOpacity(0.20))),
+              child: Container(decoration: BoxDecoration(border: Border.all(color: boxColor, width: 3.0), color: boxColor.withOpacity(0.15))),
             ),
           Positioned(
             top: 40, left: 15, right: 15,
@@ -353,8 +311,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     children: [
                       Row(
                         children: [
-                          if (isStreaming) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
-                          const Text("현장 맞춤형 MVP 비전 엔진", style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                          if (isStreaming) Container(width: 10, height: 10, margin: const EdgeInsets.only(right: 8), decoration: const BoxDecoration(color: Colors.orangeAccent, shape: BoxShape.circle)),
+                          const Text("VES 사각지대 안심 도우미", style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
@@ -364,12 +322,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text("경보단계: $alertLevel", style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.w600)),
+                      Text("상태: $alertLevel", style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.w600)),
                       Text("구역: $targetZone", style: const TextStyle(color: Colors.white70, fontSize: 11)),
                     ],
                   ),
-                  const SizedBox(height: 2),
-                  Text("상태: $saveStatusMsg", style: const TextStyle(color: Colors.white54, fontSize: 10)),
                 ],
               ),
             ),
@@ -377,7 +333,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           Positioned(
             bottom: 30, left: 20, right: 20,
             child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: isRunning ? Colors.redAccent : Colors.green, padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+              style: ElevatedButton.styleFrom(backgroundColor: isRunning ? Colors.orangeAccent : Colors.green, padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
               onPressed: () async {
                 if (isRunning) {
                   setState(() { isRunning = false; });
@@ -385,21 +341,21 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 현장 맞춤형 MVP 관제 중";
+                    driveStatus = "VES 사각지대 안심 관제 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
-                      if (now - lastFrameTime < 250) return;
+                      if (now - lastFrameTime < 300) return;
                       if (isAnalyzingFrame) return;
                       
                       lastFrameTime = now;
                       isAnalyzingFrame = true;
                       
                       try {
-                        processRealYuvFrame(image);
+                        processSoftSafetyFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
@@ -407,10 +363,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       }
                     });
                   }
-                  setState(() { isStreaming = true; saveStatusMsg = "방향성 감지 비전 엔진 가동 중"; });
+                  setState(() { isStreaming = true; saveStatusMsg = "사각지대 감시 필터 가동 중"; });
                 }
               },
-              child: Text(isRunning ? "■ 관제 종료 (EDR 마이박스 저장)" : "▶ 비전 관제 다시 시작", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+              child: Text(isRunning ? "■ 운행 종료 및 리포트 저장" : "▶ 관제 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
