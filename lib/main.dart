@@ -57,6 +57,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   double prevStructure = 0.0;
   double prevGlobalLuma = 128.0; 
 
+  // --- [추가] 자동 영점 조절 및 각도 진단 관련 변수 ---
+  bool isCalibrated = false;       // 영점 고정 여부 (true면 연산 중단하여 발열 방지)
+  double currentSpeed = 0.0;       // 현재 속도 (테스트용 가상 출발 버튼 연동)
+  String calibrationStatusMsg = "대기 중 (영점 미완료)";
+
   @override
   void initState() {
     super.initState();
@@ -70,13 +75,12 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     _driveLogSession.clear();
     _driveLogSession.add("=== VES 안심 운행 보조 리포트 ===");
     _driveLogSession.add("시작: ${now.toIso8601String()}");
-    _driveLogSession.add("모드: 사각지대 및 돌출 장애물 부드러운 주의 안내");
+    _driveLogSession.add("모드: 자동 영점 조절 및 사각지대 부드러운 주의 안내");
     _driveLogSession.add("--------------------------------------------------");
   }
 
   void initTTS() async {
     await flutterTts.setLanguage("ko-KR");
-    // 음성 톤을 더 차분하고 부드럽게 조절
     await flutterTts.setSpeechRate(0.50);
     await flutterTts.setVolume(0.9);
   }
@@ -97,7 +101,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 300) return; // 부하 방지용 주기 조절
+          if (now - lastFrameTime < 300) return; 
           
           if (isAnalyzingFrame) return;
 
@@ -124,6 +128,34 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
+  // --- [추가/개선] 2~3km/h 주행 시 자동 영점 조절 및 각도 이탈 진단 로직 ---
+  void checkAndCalibrateAngle(double speed, int height, int edgeSum, int sampleCount) {
+    if (isCalibrated) return; // 이미 영점이 잡혔다면 연산 스킵 (발열 방지)
+
+    // 차량이 2km/h 이상으로 움직이기 시작할 때 (또는 가상 출발 버튼 클릭 시)
+    if (speed >= 2.0) {
+      // 소실점/구조 분석 결과 예시 (정상 주행 시야 범위 판별)
+      // 시뮬레이션을 위해 edgeSum과 화면 높이를 활용한 비율 계산 대용 검증
+      double angleCheckValue = sampleCount > 0 ? (edgeSum / sampleCount) : 0.0;
+
+      // [시나리오] 정상적인 렌즈 각도 범위 내에 들어올 때
+      if (angleCheckValue >= 10.0 && angleCheckValue <= 100.0) {
+        setState(() {
+          isCalibrated = true;
+          calibrationStatusMsg = "영점 고정 완료 (정상 주행)";
+        });
+        triggerGentleAlert("도로 인식 완료. 안전 운행을 시작합니다.");
+      } 
+      // [시나리오] 카메라가 너무 하늘이나 바닥을 봐서 영점을 도저히 잡지 못할 때
+      else {
+        setState(() {
+          calibrationStatusMsg = "각도 비정상 (점검 필요)";
+        });
+        triggerGentleAlert("카메라 각도가 비정상입니다. 블랙박스 렌즈 위치를 점검해 주세요.");
+      }
+    }
+  }
+
   void processSoftSafetyFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
@@ -132,7 +164,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     int step = 16; 
 
-    // 지하 진출입부 및 전방 사각지대 집중 감시 구역 (중앙부)
+    // 전방 사각지대 집중 감시 구역
     int roiStartY = (height * 0.42).toInt();
     int roiEndY = (height * 0.80).toInt();
     int roiStartX = (width * 0.40).toInt();
@@ -174,6 +206,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     if (sampleCount == 0) return;
 
+    // --- [추가] 주행 시작 시 자동 영점 조절 로직 태우기 ---
+    checkAndCalibrateAngle(currentSpeed, height, edgeSum, sampleCount);
+
     double rawStructure = edgeSum / sampleCount;
     double normalizedStructure = rawStructure * (120.0 / (globalLuma + 50.0));
 
@@ -183,17 +218,16 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       return;
     }
 
-    // 전방으로 다가서는 변화량만 측정 (멀어지는 건 무시)
     double structureDelta = normalizedStructure - baselineStructure;
     if (structureDelta < 0) structureDelta = 0.0;
     
     double expansionSpeed = normalizedStructure - prevStructure;
 
     setState(() {
-      // [시나리오 반영] 급제동/빨간색 공포 경고 대신, '추돌 의심' 혹은 '사각지대 장애물' 발견 시 부드러운 주의 안내
-      if (expansionSpeed > 7.0 || structureDelta > 15.0) {
+      // 영점이 잡힌 이후부터 사각지대/추돌 의심 감시 작동
+      if (isCalibrated && (expansionSpeed > 7.0 || structureDelta > 15.0)) {
         alertLevel = "CAUTION_NOTICE";
-        boxColor = Colors.orangeAccent; // 눈이 편안한 오렌지빛 안내
+        boxColor = Colors.orangeAccent; 
         targetZone = "전방 사각지대 / 추돌 의심";
         driveStatus = "전방 장애물 주의 안내";
         threatBoundingBox = Rect.fromCenter(
@@ -201,11 +235,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           width: MediaQuery.of(context).size.width * 0.28,
           height: MediaQuery.of(context).size.height * 0.25,
         );
-        // 부드럽고 정중한 톤의 안내 멘트
         triggerGentleAlert("전방에 주의가 필요합니다. 간격을 확인하세요.");
       }
-      else {
-        // 평상시 안정 상태
+      else if (isCalibrated) {
         alertLevel = "SAFE";
         boxColor = Colors.greenAccent;
         threatBoundingBox = null;
@@ -219,7 +251,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   void triggerGentleAlert(String speechText) {
     final now = DateTime.now();
-    // 안내 멘트가 너무 자주 반복되지 않도록 8초 쿨다운 적용
     if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
       isSpeechLocked = true;
       lastSpokenTime = now;
@@ -285,6 +316,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       body: Stack(
         children: [
           SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
+          
           // 사각지대 전용 중앙 감시 박스
           Align(
             alignment: const Alignment(0, 0.35),
@@ -298,6 +330,8 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               left: threatBoundingBox!.left, top: threatBoundingBox!.top, width: threatBoundingBox!.width, height: threatBoundingBox!.height,
               child: Container(decoration: BoxDecoration(border: Border.all(color: boxColor, width: 3.0), color: boxColor.withOpacity(0.15))),
             ),
+            
+          // 상단 관제 상태 바
           Positioned(
             top: 40, left: 15, right: 15,
             child: Container(
@@ -323,13 +357,30 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text("상태: $alertLevel", style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.w600)),
-                      Text("구역: $targetZone", style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                      Text("영점: $calibrationStatusMsg", style: const TextStyle(color: Colors.yellowAccent, fontSize: 11)),
                     ],
                   ),
                 ],
               ),
             ),
           ),
+          
+          // --- [추가] 내일 영상 촬영을 위한 화면 우측 하단 '가상 출발 버튼' ---
+          Positioned(
+            bottom: 95, right: 20,
+            child: FloatingActionButton.extended(
+              onPressed: () {
+                setState(() {
+                  currentSpeed = 3.0; // 버튼을 누르면 3km/h 주행 시작으로 인식
+                });
+              },
+              label: Text(isCalibrated ? '영점 완료됨' : '가상 출발(3km)'),
+              icon: Icon(Icons.directions_bus),
+              backgroundColor: isCalibrated ? Colors.grey : Colors.amber,
+            ),
+          ),
+
+          // 하단 운행 종료 및 리포트 저장 버튼
           Positioned(
             bottom: 30, left: 20, right: 20,
             child: ElevatedButton(
@@ -341,8 +392,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
+                    isCalibrated = false; // 재시작 시 영점 초기화
+                    currentSpeed = 0.0;
                     driveStatus = "VES 사각지대 안심 관제 중";
                     boxColor = Colors.greenAccent;
+                    calibrationStatusMsg = "대기 중 (영점 미완료)";
                   });
                   if (controller != null) {
                     controller!.startImageStream((CameraImage image) {
