@@ -34,7 +34,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 모니터 테스트 중";
+  String driveStatus = "모니터 초고감도 테스트 중";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
@@ -61,7 +61,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 모니터 테스트 리포트 ===");
+    _driveLogSession.add("=== VES 모니터 초고감도 테스트 리포트 ===");
     _driveLogSession.add("시작: ${now.toIso8601String()}");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -88,7 +88,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 400) return; 
+          if (now - lastFrameTime < 300) return; 
           
           if (isAnalyzingFrame) return;
 
@@ -96,7 +96,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processMonitorFrame(image);
+            processHyperSensitiveMonitorFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -114,19 +114,18 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void processMonitorFrame(CameraImage image) {
+  void processHyperSensitiveMonitorFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
     final int rowStride = image.planes[0].bytesPerRow;
 
-    int step = 16; 
+    int step = 12; 
 
-    // 모니터 화면 중앙을 집중 타겟팅하는 ROI
     int roiStartY = (height * 0.40).toInt();
     int roiEndY = (height * 0.80).toInt();
-    int roiStartX = (width * 0.30).toInt();
-    int roiEndX = (width * 0.70).toInt();
+    int roiStartX = (width * 0.25).toInt();
+    int roiEndX = (width * 0.75).toInt();
 
     int edgeSum = 0;
     int sampleCount = 0;
@@ -146,7 +145,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 60.0) return;
+    if (lumaDelta > 70.0) return;
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -178,15 +177,15 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      // 모니터 화면 속 정체/변화에 민감하게 반응하도록 문턱값 조정
-      if (complexityChange > 9.0 || structureDelta > 16.0) {
+      // 모니터 초고감도 감지 조건
+      if (complexityChange > 3.5 || structureDelta > 6.0) {
         boxColor = Colors.orangeAccent; 
-        driveStatus = "모니터 정체/돌발 감지";
+        driveStatus = "모니터 정체/돌발 감지!";
         triggerAlert("전방 도로 통행량이 복잡합니다. 주의해 주세요.");
       } else {
         boxColor = Colors.greenAccent;
-        driveStatus = "VES 모니터 관제 중";
-        baselineStructure = (baselineStructure * 0.98) + (normalizedStructure * 0.02);
+        driveStatus = "모니터 관제 대기 중";
+        baselineStructure = (baselineStructure * 0.95) + (normalizedStructure * 0.05);
       }
       prevStructure = normalizedStructure;
     });
@@ -194,13 +193,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
   void triggerAlert(String speechText) {
     final now = DateTime.now();
-    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 12) {
+    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       flutterTts.speak(speechText);
       eventSaveCount++;
       _driveLogSession.add("[모니터 감지 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
-      Timer(const Duration(seconds: 12), () {
+      Timer(const Duration(seconds: 8), () {
         isSpeechLocked = false;
       });
     }
@@ -216,14 +215,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_Monitor_Test_$timestamp.txt');
+      final logFile = File('${targetDir.path}/VES_Monitor_HyperReport_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
       _driveLogSession.add("총 감지 횟수: $eventSaveCount건");
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        driveStatus = "테스트 종료 (리포트 저장됨)";
+        driveStatus = "테스트 종료 (리포트 저장)";
         boxColor = Colors.grey;
       });
     } catch (e) {
@@ -251,7 +250,6 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         children: [
           SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
           
-          // 모니터 타겟팅 가이드 박스 및 십자선
           Align(
             alignment: const Alignment(0, 0.40),
             child: Container(
@@ -289,7 +287,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("VES 모니터 테스트 모드", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text("VES 모니터 초고감도 테스트", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
@@ -307,21 +305,21 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 모니터 테스트 중";
+                    driveStatus = "모니터 초고감도 테스트 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
-                      if (now - lastFrameTime < 400) return;
+                      if (now - lastFrameTime < 300) return;
                       if (isAnalyzingFrame) return;
                       
                       lastFrameTime = now;
                       isAnalyzingFrame = true;
                       
                       try {
-                        processMonitorFrame(image);
+                        processHyperSensitiveMonitorFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
