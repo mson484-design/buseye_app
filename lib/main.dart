@@ -34,7 +34,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 실전 관제 중";
+  String driveStatus = "VES 모니터 테스트 중";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
@@ -54,14 +54,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void initState() {
     super.initState();
     initTTS();
-    _startNewDriveSession();
+    _startNewSession();
     initCameraAndStart();
   }
 
-  void _startNewDriveSession() {
+  void _startNewSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 운행 리포트 ===");
+    _driveLogSession.add("=== VES 모니터 테스트 리포트 ===");
     _driveLogSession.add("시작: ${now.toIso8601String()}");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -96,7 +96,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processFrame(image);
+            processMonitorFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -114,7 +114,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void processFrame(CameraImage image) {
+  void processMonitorFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -122,8 +122,9 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     int step = 16; 
 
-    int roiStartY = (height * 0.50).toInt();
-    int roiEndY = (height * 0.85).toInt();
+    // 모니터 화면 중앙을 집중 타겟팅하는 ROI
+    int roiStartY = (height * 0.40).toInt();
+    int roiEndY = (height * 0.80).toInt();
     int roiStartX = (width * 0.30).toInt();
     int roiEndX = (width * 0.70).toInt();
 
@@ -145,7 +146,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 40.0) return;
+    if (lumaDelta > 60.0) return;
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -177,13 +178,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      if (complexityChange > 8.0 || structureDelta > 18.0) {
+      // 모니터 화면 속 정체/변화에 민감하게 반응하도록 문턱값 조정
+      if (complexityChange > 9.0 || structureDelta > 16.0) {
         boxColor = Colors.orangeAccent; 
-        driveStatus = "도로 혼잡도 주의";
+        driveStatus = "모니터 정체/돌발 감지";
         triggerAlert("전방 도로 통행량이 복잡합니다. 주의해 주세요.");
       } else {
         boxColor = Colors.greenAccent;
-        driveStatus = "VES 관제 중";
+        driveStatus = "VES 모니터 관제 중";
         baselineStructure = (baselineStructure * 0.98) + (normalizedStructure * 0.02);
       }
       prevStructure = normalizedStructure;
@@ -197,14 +199,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       lastSpokenTime = now;
       flutterTts.speak(speechText);
       eventSaveCount++;
-      _driveLogSession.add("[알림 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
+      _driveLogSession.add("[모니터 감지 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
       Timer(const Duration(seconds: 12), () {
         isSpeechLocked = false;
       });
     }
   }
 
-  Future<void> stopAndSaveEDRLog() async {
+  Future<void> stopAndSaveLog() async {
     if (controller == null || !isStreaming) return;
     try {
       try { await controller!.stopImageStream(); } catch (e) {}
@@ -214,14 +216,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_Report_$timestamp.txt');
+      final logFile = File('${targetDir.path}/VES_Monitor_Test_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 알림 횟수: $eventSaveCount건");
+      _driveLogSession.add("총 감지 횟수: $eventSaveCount건");
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        driveStatus = "관제 종료";
+        driveStatus = "테스트 종료 (리포트 저장됨)";
         boxColor = Colors.grey;
       });
     } catch (e) {
@@ -248,13 +250,37 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       body: Stack(
         children: [
           SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
+          
+          // 모니터 타겟팅 가이드 박스 및 십자선
           Align(
-            alignment: const Alignment(0, 0.50),
+            alignment: const Alignment(0, 0.40),
             child: Container(
-              width: size.width * 0.40, height: size.height * 0.30,
-              decoration: BoxDecoration(border: Border.all(color: boxColor.withOpacity(0.5), width: 1.5), color: boxColor.withOpacity(0.02)),
+              width: size.width * 0.40, 
+              height: size.height * 0.30,
+              decoration: BoxDecoration(
+                border: Border.all(color: boxColor, width: 2.5), 
+                color: boxColor.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Stack(
+                children: [
+                  Center(
+                    child: Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: boxColor, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  Center(child: Container(width: 4, height: 1, color: boxColor)),
+                  Center(child: Container(width: 1, height: 4, color: boxColor)),
+                ],
+              ),
             ),
           ),
+
           Positioned(
             top: 40, left: 15, right: 15,
             child: Container(
@@ -263,12 +289,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("VES 실전 관제 앱", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text("VES 모니터 테스트 모드", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
           ),
+
           Positioned(
             bottom: 30, left: 20, right: 20,
             child: ElevatedButton(
@@ -276,11 +303,11 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               onPressed: () async {
                 if (isRunning) {
                   setState(() { isRunning = false; });
-                  await stopAndSaveEDRLog();
+                  await stopAndSaveLog();
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 실전 관제 중";
+                    driveStatus = "VES 모니터 테스트 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
@@ -294,7 +321,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       isAnalyzingFrame = true;
                       
                       try {
-                        processFrame(image);
+                        processMonitorFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
@@ -305,7 +332,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                   setState(() { isStreaming = true; });
                 }
               },
-              child: Text(isRunning ? "■ 운행 종료 및 리포트 저장" : "▶ 관제 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
+              child: Text(isRunning ? "■ 테스트 종료 및 리포트 저장" : "▶ 테스트 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
