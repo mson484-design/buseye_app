@@ -34,7 +34,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 3단계 경고 모니터링 중";
+  String driveStatus = "VES 안정형 3단계 모니터링";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
@@ -61,7 +61,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 3단계 경고 모니터 리포트 ===");
+    _driveLogSession.add("=== VES 안정형 3단계 리포트 ===");
     _driveLogSession.add("시작: ${now.toIso8601String()}");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -88,7 +88,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
         controller!.startImageStream((CameraImage image) {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
-          if (now - lastFrameTime < 300) return; 
+          if (now - lastFrameTime < 400) return; // 프레임 주기 조절로 남발 방지
           
           if (isAnalyzingFrame) return;
 
@@ -96,7 +96,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           isAnalyzingFrame = true;
           
           try {
-            process3TierAlertFrame(image);
+            processStable3TierFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -114,13 +114,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void process3TierAlertFrame(CameraImage image) {
+  void processStable3TierFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
     final int rowStride = image.planes[0].bytesPerRow;
 
-    int step = 12; 
+    int step = 16; 
 
     int roiStartY = (height * 0.40).toInt();
     int roiEndY = (height * 0.80).toInt();
@@ -145,7 +145,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
 
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 70.0) return;
+    if (lumaDelta > 50.0) return;
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -177,26 +177,26 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      // 3단계 분류 로직
-      if (complexityChange > 12.0 || structureDelta > 18.0) {
+      // [튜닝] 정상 주행 시 멘트 남발을 막기 위해 문턱값을 상향 조정
+      if (complexityChange > 10.0 || structureDelta > 16.0) {
         // [3단계] 강력 경고 (급정체/돌발)
         boxColor = Colors.redAccent;
         driveStatus = "🚨 3단계 긴급 경고!";
         triggerTieredAlert("전방 급정체! 즉시 감속하세요!", 3);
-      } else if (complexityChange > 7.0 || structureDelta > 11.0) {
+      } else if (complexityChange > 6.0 || structureDelta > 10.0) {
         // [2단계] 주의 심화 (정체 구간 3번 반복 안내)
         boxColor = Colors.orangeAccent;
         driveStatus = "⚠️ 2단계 정체 주의";
         triggerTieredAlert("전방 정체 구간, 속도를 줄이세요.", 2);
-      } else if (complexityChange > 3.5 || structureDelta > 5.5) {
+      } else if (complexityChange > 3.8 || structureDelta > 6.5) {
         // [1단계] 일반 혼잡 (1번 안내)
         boxColor = Colors.amber;
         driveStatus = "⚡ 1단계 교통 혼잡";
         triggerTieredAlert("전방 교통 혼잡, 주의하세요.", 1);
       } else {
         boxColor = Colors.greenAccent;
-        driveStatus = "VES 모니터 관제 정상";
-        baselineStructure = (baselineStructure * 0.95) + (normalizedStructure * 0.05);
+        driveStatus = "정상 주행 관제 중";
+        baselineStructure = (baselineStructure * 0.98) + (normalizedStructure * 0.02);
       }
       prevStructure = normalizedStructure;
     });
@@ -205,14 +205,13 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void triggerTieredAlert(String speechText, int tier) {
     final now = DateTime.now();
     
-    // 티어별 쿨타임 차등 적용 (3단계는 긴급하므로 쿨타임 짧게)
-    int cooldown = (tier == 3) ? 4 : 8;
+    // 멘트 남발 방지를 위해 쿨타임 연장 (1단계는 12초, 2단계는 10초, 3단계는 6초)
+    int cooldown = (tier == 3) ? 6 : (tier == 2) ? 10 : 12;
 
     if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldown) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       
-      // 단계별 반복 횟수 처리 (2단계는 3번 반복 발화)
       if (tier == 2) {
         speakRepeatedly(speechText, 3);
       } else {
@@ -231,7 +230,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void speakRepeatedly(String text, int count) async {
     for (int i = 0; i < count; i++) {
       flutterTts.speak(text);
-      await Future.delayed(const Duration(milliseconds: 2500)); // 멘트 간 간격
+      await Future.delayed(const Duration(milliseconds: 2500));
     }
   }
 
@@ -245,10 +244,10 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_3Tier_Report_$timestamp.txt');
+      final logFile = File('${targetDir.path}/VES_Stable_Report_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 경고 발생 횟수: $eventSaveCount건");
+      _driveLogSession.add("총 경고 횟수: $eventSaveCount건");
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
@@ -317,7 +316,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("VES 3단계 경고 시뮬레이터", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text("VES 안정형 3단계 모니터링", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
@@ -335,21 +334,21 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 3단계 경고 모니터링 중";
+                    driveStatus = "VES 안정형 3단계 모니터링";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
-                      if (now - lastFrameTime < 300) return;
+                      if (now - lastFrameTime < 400) return;
                       if (isAnalyzingFrame) return;
                       
                       lastFrameTime = now;
                       isAnalyzingFrame = true;
                       
                       try {
-                        process3TierAlertFrame(image);
+                        processStable3TierFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
