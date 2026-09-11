@@ -34,7 +34,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "모니터 초고감도 테스트 중";
+  String driveStatus = "VES 3단계 경고 모니터링 중";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
@@ -61,7 +61,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
   void _startNewSession() {
     final now = DateTime.now();
     _driveLogSession.clear();
-    _driveLogSession.add("=== VES 모니터 초고감도 테스트 리포트 ===");
+    _driveLogSession.add("=== VES 3단계 경고 모니터 리포트 ===");
     _driveLogSession.add("시작: ${now.toIso8601String()}");
     _driveLogSession.add("--------------------------------------------------");
   }
@@ -96,7 +96,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processHyperSensitiveMonitorFrame(image);
+            process3TierAlertFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -114,7 +114,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     }
   }
 
-  void processHyperSensitiveMonitorFrame(CameraImage image) {
+  void process3TierAlertFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -177,31 +177,61 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      // 모니터 초고감도 감지 조건
-      if (complexityChange > 3.5 || structureDelta > 6.0) {
-        boxColor = Colors.orangeAccent; 
-        driveStatus = "모니터 정체/돌발 감지!";
-        triggerAlert("전방 도로 통행량이 복잡합니다. 주의해 주세요.");
+      // 3단계 분류 로직
+      if (complexityChange > 12.0 || structureDelta > 18.0) {
+        // [3단계] 강력 경고 (급정체/돌발)
+        boxColor = Colors.redAccent;
+        driveStatus = "🚨 3단계 긴급 경고!";
+        triggerTieredAlert("전방 급정체! 즉시 감속하세요!", 3);
+      } else if (complexityChange > 7.0 || structureDelta > 11.0) {
+        // [2단계] 주의 심화 (정체 구간 3번 반복 안내)
+        boxColor = Colors.orangeAccent;
+        driveStatus = "⚠️ 2단계 정체 주의";
+        triggerTieredAlert("전방 정체 구간, 속도를 줄이세요.", 2);
+      } else if (complexityChange > 3.5 || structureDelta > 5.5) {
+        // [1단계] 일반 혼잡 (1번 안내)
+        boxColor = Colors.amber;
+        driveStatus = "⚡ 1단계 교통 혼잡";
+        triggerTieredAlert("전방 교통 혼잡, 주의하세요.", 1);
       } else {
         boxColor = Colors.greenAccent;
-        driveStatus = "모니터 관제 대기 중";
+        driveStatus = "VES 모니터 관제 정상";
         baselineStructure = (baselineStructure * 0.95) + (normalizedStructure * 0.05);
       }
       prevStructure = normalizedStructure;
     });
   }
 
-  void triggerAlert(String speechText) {
+  void triggerTieredAlert(String speechText, int tier) {
     final now = DateTime.now();
-    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= 8) {
+    
+    // 티어별 쿨타임 차등 적용 (3단계는 긴급하므로 쿨타임 짧게)
+    int cooldown = (tier == 3) ? 4 : 8;
+
+    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldown) {
       isSpeechLocked = true;
       lastSpokenTime = now;
-      flutterTts.speak(speechText);
+      
+      // 단계별 반복 횟수 처리 (2단계는 3번 반복 발화)
+      if (tier == 2) {
+        speakRepeatedly(speechText, 3);
+      } else {
+        flutterTts.speak(speechText);
+      }
+
       eventSaveCount++;
-      _driveLogSession.add("[모니터 감지 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
-      Timer(const Duration(seconds: 8), () {
+      _driveLogSession.add("[티어 $tier 경고 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
+      
+      Timer(Duration(seconds: cooldown), () {
         isSpeechLocked = false;
       });
+    }
+  }
+
+  void speakRepeatedly(String text, int count) async {
+    for (int i = 0; i < count; i++) {
+      flutterTts.speak(text);
+      await Future.delayed(const Duration(milliseconds: 2500)); // 멘트 간 간격
     }
   }
 
@@ -215,14 +245,14 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_Monitor_HyperReport_$timestamp.txt');
+      final logFile = File('${targetDir.path}/VES_3Tier_Report_$timestamp.txt');
       _driveLogSession.add("--------------------------------------------------");
       _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 감지 횟수: $eventSaveCount건");
+      _driveLogSession.add("총 경고 발생 횟수: $eventSaveCount건");
       await logFile.writeAsString(_driveLogSession.join('\n'));
 
       setState(() {
-        driveStatus = "테스트 종료 (리포트 저장)";
+        driveStatus = "테스트 종료 (리포트 저장됨)";
         boxColor = Colors.grey;
       });
     } catch (e) {
@@ -287,7 +317,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("VES 모니터 초고감도 테스트", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text("VES 3단계 경고 시뮬레이터", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
@@ -305,7 +335,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "모니터 초고감도 테스트 중";
+                    driveStatus = "VES 3단계 경고 모니터링 중";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
@@ -319,7 +349,7 @@ class _VESSafetyScreenState extends State<VESSafetyScreen> {
                       isAnalyzingFrame = true;
                       
                       try {
-                        processHyperSensitiveMonitorFrame(image);
+                        process3TierAlertFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
