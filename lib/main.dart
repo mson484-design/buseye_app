@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:geolocator/geolocator.dart'; 
 
 List<CameraDescription> cameras = [];
 
@@ -16,32 +15,31 @@ Future<void> main() async {
     debugPrint('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: VESRealDriveScreen(),
+    home: VESRealFieldScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class VESRealDriveScreen extends StatefulWidget {
-  const VESRealDriveScreen({Key? key}) : super(key: key);
+class VESRealFieldScreen extends StatefulWidget {
+  const VESRealFieldScreen({Key? key}) : super(key: key);
 
   @override
-  State<VESRealDriveScreen> createState() => _VESRealDriveScreenState();
+  State<VESRealFieldScreen> createState() => _VESRealFieldScreenState();
 }
 
-class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
+class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
-  StreamSubscription<Position>? positionStream;
 
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "GPS 연결 중...";
+  String driveStatus = "VES 실차 주행 관제 중";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
-  DateTime lastBusStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2)); // 정류장 멘트 남발 방지 (2분 쿨타임)
+  DateTime lastBusStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2));
 
   bool isAnalyzingFrame = false;
   int lastFrameTime = 0;
@@ -50,48 +48,19 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
   double prevStructure = 0.0;
   double prevGlobalLuma = 128.0; 
 
-  double currentRealSpeed = 0.0; 
   bool isBusStopMode = false;
-  
-  final List<String> _driveLog = [];
 
   @override
   void initState() {
     super.initState();
     initTTS();
     initCameraAndStart();
-    _startGPSLocationTracking();
-    _driveLog.add("=== VES 실차 테스트 로그 (GPS 연동) ===");
   }
 
   void initTTS() async {
     await flutterTts.setLanguage("ko-KR");
     await flutterTts.setSpeechRate(0.50);
     await flutterTts.setVolume(1.0);
-  }
-
-  void _startGPSLocationTracking() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      setState(() { driveStatus = "GPS 기능이 꺼져있습니다."; });
-      return;
-    }
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-      positionStream = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high)
-      ).listen((Position position) {
-        if (!mounted) return;
-        setState(() {
-          currentRealSpeed = position.speed * 3.6; // m/s -> km/h 변환
-        });
-      });
-    }
   }
 
   Future<void> initCameraAndStart() async {
@@ -118,7 +87,7 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processRealDriveFrame(image);
+            processRealFieldFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -132,7 +101,7 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
     }
   }
 
-  void processRealDriveFrame(CameraImage image) {
+  void processRealFieldFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -140,7 +109,7 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
 
     int step = 16; 
 
-    // 실차 환경: 하늘(구름, 햇빛)과 반대편 차선을 배제한 내 차로 집중 ROI
+    // [실차 최적화 ROI] 하늘을 제외하고 내 차 앞 전방 도로 영역만 집중 타겟팅
     int roiStartY = (height * 0.55).toInt();
     int roiEndY = (height * 0.85).toInt();
     int roiStartX = (width * 0.35).toInt();
@@ -164,7 +133,7 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
     
-    // 갑작스러운 그림자나 터널 진입 시 오작동 방지 (Luma 변화가 크면 이번 프레임 스킵)
+    // 갑작스러운 조도 변화(터널 입출구, 구름 그림자) 필터링
     if (lumaDelta > 45.0) return; 
 
     for (int y = roiStartY; y < roiEndY; y += step) {
@@ -196,24 +165,16 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      // 1. [정차/초저속] 속도 5km/h 이하: 정류장/신호대기 
-      if (currentRealSpeed <= 5.0) {
+      // 차량 정차 또는 서행 시 화면 변화가 적을 때 정류장/신호대기 모드 진입
+      if (normalizedStructure < 7.5) {
         isBusStopMode = true;
         boxColor = Colors.lightBlueAccent;
-        driveStatus = "정차/초저속 (정류장/신호대기)";
+        driveStatus = "정차/서행 (정류장 감시 활성)";
         triggerAutoBusStopAlert();
-      } 
-      // 2. [서행/멘트 차단] 속도 20km/h 이하: 서행 시 멘트 남발 완벽 차단
-      else if (currentRealSpeed <= 20.0) {
-        isBusStopMode = false;
-        boxColor = Colors.grey;
-        driveStatus = "서행 중 (경고 음소거됨)";
-        baselineStructure = (baselineStructure * 0.99) + (normalizedStructure * 0.01);
-      } 
-      // 3. [정상 주행] 속도 20km/h 초과: 실차 3단계 경고 (문턱값 상향으로 남발 방지)
-      else {
+      } else {
         isBusStopMode = false;
         
+        // 실차 주행 중 3단계 경고 시스템 (오작동/멘트 남발 원천 방지용 상향 문턱값 적용)
         if (complexityChange > 22.0 || structureDelta > 30.0) {
           boxColor = Colors.redAccent;
           driveStatus = "🚨 3단계 긴급 경고";
@@ -238,30 +199,22 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
 
   void triggerAlert(String text, int tier) {
     final now = DateTime.now();
-    // 멘트 남발 방지를 위해 쿨타임 대폭 강화 (3단계 8초, 2단계 15초, 1단계 20초)
     int cooldown = (tier == 3) ? 8 : (tier == 2) ? 15 : 20;
 
     if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldown) {
       isSpeechLocked = true;
       lastSpokenTime = now;
-      
       flutterTts.speak(text);
-      
-      _driveLog.add("${now.toIso8601String()}, ${currentRealSpeed.toInt()}km/h, Tier $tier");
-      
       Timer(Duration(seconds: cooldown), () { isSpeechLocked = false; });
     }
   }
 
   void triggerAutoBusStopAlert() {
     final now = DateTime.now();
-    // 정류장/정차 안내는 멘트 남발 방지를 위해 무려 120초(2분)에 한 번만 나오도록 설정
     if (!isSpeechLocked && now.difference(lastBusStopSpokenTime).inSeconds >= 120) {
       isSpeechLocked = true;
       lastBusStopSpokenTime = now;
-      
       flutterTts.speak("정차 구간입니다. 승객 승하차에 주의하세요.");
-      
       Timer(const Duration(seconds: 8), () { isSpeechLocked = false; });
     }
   }
@@ -271,7 +224,6 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
     if (controller != null && isStreaming) { controller!.stopImageStream(); }
     controller?.dispose();
     flutterTts.stop();
-    positionStream?.cancel();
     super.dispose();
   }
 
@@ -323,7 +275,7 @@ class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text("GPS 속도: ${currentRealSpeed.toInt()} km/h", style: TextStyle(color: currentRealSpeed <= 20 ? Colors.grey : Colors.cyanAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+                  const Text("VES 실차 관제 모드", style: TextStyle(color: Colors.cyanAccent, fontSize: 15, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
