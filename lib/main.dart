@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:geolocator/geolocator.dart'; 
 
 List<CameraDescription> cameras = [];
 
@@ -15,63 +16,82 @@ Future<void> main() async {
     debugPrint('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: VESDeepLearningScreen(),
+    home: VESRealDriveScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class VESDeepLearningScreen extends StatefulWidget {
-  const VESDeepLearningScreen({Key? key}) : super(key: key);
+class VESRealDriveScreen extends StatefulWidget {
+  const VESRealDriveScreen({Key? key}) : super(key: key);
 
   @override
-  State<VESDeepLearningScreen> createState() => _VESDeepLearningScreenState();
+  State<VESRealDriveScreen> createState() => _VESRealDriveScreenState();
 }
 
-class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
+class _VESRealDriveScreenState extends State<VESRealDriveScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
+  StreamSubscription<Position>? positionStream;
 
   bool isRunning = true;
   bool isStreaming = false;
 
-  String currentMode = "CCTV"; 
-  String driveStatus = "VES 모니터 관제 대기 중";
+  String driveStatus = "GPS 연결 중...";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
+  DateTime lastBusStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2)); // 정류장 멘트 남발 방지 (2분 쿨타임)
 
   bool isAnalyzingFrame = false;
   int lastFrameTime = 0;
-
-  final List<String> _dlDatasetLog = [];
-  int eventSaveCount = 0;
 
   double baselineStructure = 0.0;
   double prevStructure = 0.0;
   double prevGlobalLuma = 128.0; 
 
+  double currentRealSpeed = 0.0; 
+  bool isBusStopMode = false;
+  
+  final List<String> _driveLog = [];
+
   @override
   void initState() {
     super.initState();
     initTTS();
-    _startNewDeepLearningSession();
     initCameraAndStart();
-  }
-
-  void _startNewDeepLearningSession() {
-    final now = DateTime.now();
-    _dlDatasetLog.clear();
-    _dlDatasetLog.add("=== VES Deep Learning Dataset ===");
-    _dlDatasetLog.add("Session Start: ${now.toIso8601String()}");
-    _dlDatasetLog.add("Timestamp,Mode,GlobalLuma,ComplexityChange,StructureDelta,TierLabel,Action");
-    _dlDatasetLog.add("--------------------------------------------------");
+    _startGPSLocationTracking();
+    _driveLog.add("=== VES 실차 테스트 로그 (GPS 연동) ===");
   }
 
   void initTTS() async {
     await flutterTts.setLanguage("ko-KR");
     await flutterTts.setSpeechRate(0.50);
-    await flutterTts.setVolume(0.9);
+    await flutterTts.setVolume(1.0);
+  }
+
+  void _startGPSLocationTracking() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      setState(() { driveStatus = "GPS 기능이 꺼져있습니다."; });
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+      positionStream = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high)
+      ).listen((Position position) {
+        if (!mounted) return;
+        setState(() {
+          currentRealSpeed = position.speed * 3.6; // m/s -> km/h 변환
+        });
+      });
+    }
   }
 
   Future<void> initCameraAndStart() async {
@@ -91,34 +111,28 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
           
-          int frameInterval = (currentMode == "CCTV") ? 600 : 400;
-          if (now - lastFrameTime < frameInterval) return; 
-          
+          if (now - lastFrameTime < 400) return; 
           if (isAnalyzingFrame) return;
 
           lastFrameTime = now;
           isAnalyzingFrame = true;
           
           try {
-            processDeepLearningFrame(image);
+            processRealDriveFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
             isAnalyzingFrame = false; 
           }
         });
-
-        setState(() {
-          isStreaming = true;
-        });
-
+        setState(() { isStreaming = true; });
       } catch (e) {
         debugPrint("Camera Start Error: $e");
       }
     }
   }
 
-  void processDeepLearningFrame(CameraImage image) {
+  void processRealDriveFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -126,10 +140,11 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
 
     int step = 16; 
 
-    int roiStartY = (currentMode == "CCTV") ? (height * 0.35).toInt() : (height * 0.55).toInt();
-    int roiEndY = (currentMode == "CCTV") ? (height * 0.75).toInt() : (height * 0.85).toInt();
-    int roiStartX = (width * 0.30).toInt();
-    int roiEndX = (width * 0.70).toInt();
+    // 실차 환경: 하늘(구름, 햇빛)과 반대편 차선을 배제한 내 차로 집중 ROI
+    int roiStartY = (height * 0.55).toInt();
+    int roiEndY = (height * 0.85).toInt();
+    int roiStartX = (width * 0.35).toInt();
+    int roiEndX = (width * 0.65).toInt();
 
     int edgeSum = 0;
     int sampleCount = 0;
@@ -146,10 +161,11 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
       }
     }
     double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
-
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 55.0) return; 
+    
+    // 갑작스러운 그림자나 터널 진입 시 오작동 방지 (Luma 변화가 크면 이번 프레임 스킵)
+    if (lumaDelta > 45.0) return; 
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -177,97 +193,76 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
 
     double structureDelta = normalizedStructure - baselineStructure;
     if (structureDelta < 0) structureDelta = 0.0;
-    
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
-    // [수정 핵심] 모니터(CCTV) 모드 임계값 재조정 
-    // 기존의 과도하게 높았던 수치(28.0, 18.0, 11.0)를 대폭 하향하여 정상적인 정체 영상에 반응하도록 수정했습니다.
-    double t3Limit = (currentMode == "CCTV") ? 18.0 : 18.0; 
-    double t2Limit = (currentMode == "CCTV") ? 12.0 : 11.0; 
-    double t1Limit = (currentMode == "CCTV") ? 7.5 : 6.5; 
-
     setState(() {
-      int currentTier = 0;
-
-      if (complexityChange > t3Limit || structureDelta > (t3Limit * 1.5)) {
-        currentTier = 3;
-        boxColor = Colors.redAccent;
-        driveStatus = "🚨 [$currentMode] 3단계 긴급 (데이터 기록중)";
-        triggerTieredAlert("전방 급정체! 즉시 감속하세요!", 3, globalLuma, complexityChange, structureDelta);
-      } else if (complexityChange > t2Limit || structureDelta > (t2Limit * 1.5)) {
-        currentTier = 2;
-        boxColor = Colors.orangeAccent;
-        driveStatus = "⚠️ [$currentMode] 2단계 주의 (데이터 기록중)";
-        triggerTieredAlert("전방 정체 구간, 속도를 줄이세요.", 2, globalLuma, complexityChange, structureDelta);
-      } else if (complexityChange > t1Limit || structureDelta > (t1Limit * 1.4)) {
-        currentTier = 1;
-        boxColor = Colors.amber;
-        driveStatus = "⚡ [$currentMode] 1단계 혼잡 (데이터 기록중)";
-        triggerTieredAlert("전방 교통 혼잡, 주의하세요.", 1, globalLuma, complexityChange, structureDelta);
-      } else {
-        boxColor = Colors.greenAccent;
-        driveStatus = "[$currentMode] 정상 관제 (학습 데이터 누적)";
+      // 1. [정차/초저속] 속도 5km/h 이하: 정류장/신호대기 
+      if (currentRealSpeed <= 5.0) {
+        isBusStopMode = true;
+        boxColor = Colors.lightBlueAccent;
+        driveStatus = "정차/초저속 (정류장/신호대기)";
+        triggerAutoBusStopAlert();
+      } 
+      // 2. [서행/멘트 차단] 속도 20km/h 이하: 서행 시 멘트 남발 완벽 차단
+      else if (currentRealSpeed <= 20.0) {
+        isBusStopMode = false;
+        boxColor = Colors.grey;
+        driveStatus = "서행 중 (경고 음소거됨)";
         baselineStructure = (baselineStructure * 0.99) + (normalizedStructure * 0.01);
+      } 
+      // 3. [정상 주행] 속도 20km/h 초과: 실차 3단계 경고 (문턱값 상향으로 남발 방지)
+      else {
+        isBusStopMode = false;
+        
+        if (complexityChange > 22.0 || structureDelta > 30.0) {
+          boxColor = Colors.redAccent;
+          driveStatus = "🚨 3단계 긴급 경고";
+          triggerAlert("전방 급정체! 즉시 감속하세요!", 3);
+        } else if (complexityChange > 14.0 || structureDelta > 19.0) {
+          boxColor = Colors.orangeAccent;
+          driveStatus = "⚠️ 2단계 정체 주의";
+          triggerAlert("전방 정체 구간, 속도를 줄이세요.", 2);
+        } else if (complexityChange > 8.0 || structureDelta > 11.0) {
+          boxColor = Colors.amber;
+          driveStatus = "⚡ 1단계 교통 혼잡";
+          triggerAlert("전방 교통 혼잡, 주의하세요.", 1);
+        } else {
+          boxColor = Colors.greenAccent;
+          driveStatus = "정상 주행 관제 중";
+          baselineStructure = (baselineStructure * 0.99) + (normalizedStructure * 0.01);
+        }
       }
       prevStructure = normalizedStructure;
     });
   }
 
-  void triggerTieredAlert(String speechText, int tier, double luma, double complexity, double structure) {
+  void triggerAlert(String text, int tier) {
     final now = DateTime.now();
-    int cooldown = (tier == 3) ? 8 : (tier == 2) ? 12 : 15;
+    // 멘트 남발 방지를 위해 쿨타임 대폭 강화 (3단계 8초, 2단계 15초, 1단계 20초)
+    int cooldown = (tier == 3) ? 8 : (tier == 2) ? 15 : 20;
 
     if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldown) {
       isSpeechLocked = true;
       lastSpokenTime = now;
       
-      if (tier == 2) {
-        speakRepeatedly(speechText, 3);
-      } else {
-        flutterTts.speak(speechText);
-      }
-
-      eventSaveCount++;
-      
-      String timeStr = now.toIso8601String();
-      String dlLog = "$timeStr,$currentMode,${luma.toStringAsFixed(2)},${complexity.toStringAsFixed(2)},${structure.toStringAsFixed(2)},Tier_$tier,$speechText";
-      _dlDatasetLog.add(dlLog);
-      
-      Timer(Duration(seconds: cooldown), () {
-        isSpeechLocked = false;
-      });
-    }
-  }
-
-  void speakRepeatedly(String text, int count) async {
-    for (int i = 0; i < count; i++) {
       flutterTts.speak(text);
-      await Future.delayed(const Duration(milliseconds: 2500));
+      
+      _driveLog.add("${now.toIso8601String()}, ${currentRealSpeed.toInt()}km/h, Tier $tier");
+      
+      Timer(Duration(seconds: cooldown), () { isSpeechLocked = false; });
     }
   }
 
-  Future<void> stopAndSaveDeepLearningData() async {
-    if (controller == null || !isStreaming) return;
-    try {
-      try { await controller!.stopImageStream(); } catch (e) {}
-      setState(() { isStreaming = false; });
-
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
-      if (!await targetDir.exists()) await targetDir.create(recursive: true);
-
-      final logFile = File('${targetDir.path}/VES_ML_Dataset_$timestamp.csv');
-      _dlDatasetLog.add("--------------------------------------------------");
-      _dlDatasetLog.add("Session End: ${DateTime.now().toIso8601String()}");
-      _dlDatasetLog.add("Total Labeled Events: $eventSaveCount");
-      await logFile.writeAsString(_dlDatasetLog.join('\n'));
-
-      setState(() {
-        driveStatus = "관제 종료 (딥러닝 데이터셋 저장 완료)";
-        boxColor = Colors.grey;
-      });
-    } catch (e) {
-      debugPrint("Save error: $e");
+  void triggerAutoBusStopAlert() {
+    final now = DateTime.now();
+    // 정류장/정차 안내는 멘트 남발 방지를 위해 무려 120초(2분)에 한 번만 나오도록 설정
+    if (!isSpeechLocked && now.difference(lastBusStopSpokenTime).inSeconds >= 120) {
+      isSpeechLocked = true;
+      lastBusStopSpokenTime = now;
+      
+      flutterTts.speak("정차 구간입니다. 승객 승하차에 주의하세요.");
+      
+      Timer(const Duration(seconds: 8), () { isSpeechLocked = false; });
     }
   }
 
@@ -276,6 +271,7 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
     if (controller != null && isStreaming) { controller!.stopImageStream(); }
     controller?.dispose();
     flutterTts.stop();
+    positionStream?.cancel();
     super.dispose();
   }
 
@@ -294,96 +290,43 @@ class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
           Align(
             alignment: const Alignment(0, 0.40),
             child: Container(
-              width: size.width * 0.40, 
-              height: size.height * 0.30,
-              decoration: BoxDecoration(
-                border: Border.all(color: boxColor, width: 2.5), 
-                color: boxColor.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Stack(
-                children: [
-                  Center(
-                    child: Container(
-                      width: 12,
-                      height: 12,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: boxColor, width: 1.5),
-                      ),
-                    ),
-                  ),
-                  Center(child: Container(width: 4, height: 1, color: boxColor)),
-                  Center(child: Container(width: 1, height: 4, color: boxColor)),
-                ],
-              ),
+              width: size.width * 0.35, height: size.height * 0.25,
+              decoration: BoxDecoration(border: Border.all(color: boxColor, width: 2.5), borderRadius: BorderRadius.circular(8)),
             ),
           ),
+
+          if (isBusStopMode)
+            Align(
+              alignment: const Alignment(0.85, 0.40),
+              child: Container(
+                width: size.width * 0.25, height: size.height * 0.40,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.lightBlueAccent, width: 3.0),
+                  color: Colors.lightBlueAccent.withOpacity(0.2),
+                ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.directions_bus, color: Colors.white, size: 40),
+                    SizedBox(height: 8),
+                    Text("승객 스캔 활성", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                  ],
+                ),
+              ),
+            ),
 
           Positioned(
             top: 40, left: 15, right: 15,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(10), border: Border.all(color: boxColor, width: 1.5)),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        currentMode = (currentMode == "CCTV") ? "LIVE" : "CCTV";
-                      });
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(color: Colors.cyanAccent, borderRadius: BorderRadius.circular(4)),
-                      child: Text("소스: $currentMode", style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.bold)),
-                    ),
-                  ),
-                  Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
+                  Text("GPS 속도: ${currentRealSpeed.toInt()} km/h", style: TextStyle(color: currentRealSpeed <= 20 ? Colors.grey : Colors.cyanAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+                  Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
-            ),
-          ),
-
-          Positioned(
-            bottom: 30, left: 20, right: 20,
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: isRunning ? Colors.orangeAccent : Colors.green, padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-              onPressed: () async {
-                if (isRunning) {
-                  setState(() { isRunning = false; });
-                  await stopAndSaveDeepLearningData();
-                } else {
-                  setState(() {
-                    isRunning = true;
-                    driveStatus = "VES 딥러닝 데이터 수집 재가동";
-                    boxColor = Colors.greenAccent;
-                  });
-                  if (controller != null) {
-                    controller!.startImageStream((CameraImage image) {
-                      if (!isRunning) return;
-                      final int now = DateTime.now().millisecondsSinceEpoch;
-                      int interval = (currentMode == "CCTV") ? 600 : 400;
-                      if (now - lastFrameTime < interval) return;
-                      if (isAnalyzingFrame) return;
-                      
-                      lastFrameTime = now;
-                      isAnalyzingFrame = true;
-                      
-                      try {
-                        processDeepLearningFrame(image);
-                      } catch (e) {
-                        debugPrint("Error: $e");
-                      } finally {
-                        isAnalyzingFrame = false;
-                      }
-                    });
-                  }
-                  setState(() { isStreaming = true; });
-                }
-              },
-              child: Text(isRunning ? "■ 운행 종료 및 ML 데이터셋 저장" : "▶ AI 관제 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
