@@ -15,28 +15,27 @@ Future<void> main() async {
     debugPrint('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: VESIntegratedScreen(),
+    home: VESDeepLearningScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class VESIntegratedScreen extends StatefulWidget {
-  const VESIntegratedScreen({Key? key}) : super(key: key);
+class VESDeepLearningScreen extends StatefulWidget {
+  const VESDeepLearningScreen({Key? key}) : super(key: key);
 
   @override
-  State<VESIntegratedScreen> createState() => _VESIntegratedScreenState();
+  State<VESDeepLearningScreen> createState() => _VESDeepLearningScreenState();
 }
 
-class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
+class _VESDeepLearningScreenState extends State<VESDeepLearningScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
   bool isStreaming = false;
 
-  // 관제 모드 선택 (LIVE: 실차 주행 / MONITOR: 모니터 및 블박/CCTV 분석)
-  String currentMode = "MONITOR"; 
-  String driveStatus = "VES 통합 멀티소스 관제 대기";
+  String currentMode = "CCTV"; 
+  String driveStatus = "VES 모니터 관제 대기 중";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
@@ -45,7 +44,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
   bool isAnalyzingFrame = false;
   int lastFrameTime = 0;
 
-  final List<String> _driveLogSession = [];
+  final List<String> _dlDatasetLog = [];
   int eventSaveCount = 0;
 
   double baselineStructure = 0.0;
@@ -56,16 +55,17 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
   void initState() {
     super.initState();
     initTTS();
-    _startNewSession();
+    _startNewDeepLearningSession();
     initCameraAndStart();
   }
 
-  void _startNewSession() {
+  void _startNewDeepLearningSession() {
     final now = DateTime.now();
-    _driveLogSession.clear();
-    _driveLogSession.add("=== VES 통합 관제 리포트 (실차/모니터/블박/CCTV) ===");
-    _driveLogSession.add("시작: ${now.toIso8601String()}");
-    _driveLogSession.add("--------------------------------------------------");
+    _dlDatasetLog.clear();
+    _dlDatasetLog.add("=== VES Deep Learning Dataset ===");
+    _dlDatasetLog.add("Session Start: ${now.toIso8601String()}");
+    _dlDatasetLog.add("Timestamp,Mode,GlobalLuma,ComplexityChange,StructureDelta,TierLabel,Action");
+    _dlDatasetLog.add("--------------------------------------------------");
   }
 
   void initTTS() async {
@@ -91,8 +91,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
           if (!isRunning) return;
           final int now = DateTime.now().millisecondsSinceEpoch;
           
-          // 모드에 따라 프레임 샘플링 주기 최적화 (모니터는 600ms로 노이즈 타임블록 필터링)
-          int frameInterval = (currentMode == "MONITOR") ? 600 : 400;
+          int frameInterval = (currentMode == "CCTV") ? 600 : 400;
           if (now - lastFrameTime < frameInterval) return; 
           
           if (isAnalyzingFrame) return;
@@ -101,7 +100,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
           isAnalyzingFrame = true;
           
           try {
-            processMultiSourceFrame(image);
+            processDeepLearningFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -119,7 +118,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
     }
   }
 
-  void processMultiSourceFrame(CameraImage image) {
+  void processDeepLearningFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -127,9 +126,8 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
 
     int step = 16; 
 
-    // 모드별 최적 감시 구역(ROI) 동적 매핑
-    int roiStartY = (currentMode == "MONITOR") ? (height * 0.35).toInt() : (height * 0.55).toInt();
-    int roiEndY = (currentMode == "MONITOR") ? (height * 0.75).toInt() : (height * 0.85).toInt();
+    int roiStartY = (currentMode == "CCTV") ? (height * 0.35).toInt() : (height * 0.55).toInt();
+    int roiEndY = (currentMode == "CCTV") ? (height * 0.75).toInt() : (height * 0.85).toInt();
     int roiStartX = (width * 0.30).toInt();
     int roiEndX = (width * 0.70).toInt();
 
@@ -151,7 +149,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
 
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
-    if (lumaDelta > 55.0) return;
+    if (lumaDelta > 55.0) return; 
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -182,34 +180,40 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
     
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
-    // 모니터/블박 분석 모드일 때 디지털 주사선 오작동 방지를 위한 추가 문턱 방어벽
-    double t3Limit = (currentMode == "MONITOR") ? 28.0 : 18.0;
-    double t2Limit = (currentMode == "MONITOR") ? 18.0 : 11.0;
-    double t1Limit = (currentMode == "MONITOR") ? 11.0 : 6.5;
+    // [수정 핵심] 모니터(CCTV) 모드 임계값 재조정 
+    // 기존의 과도하게 높았던 수치(28.0, 18.0, 11.0)를 대폭 하향하여 정상적인 정체 영상에 반응하도록 수정했습니다.
+    double t3Limit = (currentMode == "CCTV") ? 18.0 : 18.0; 
+    double t2Limit = (currentMode == "CCTV") ? 12.0 : 11.0; 
+    double t1Limit = (currentMode == "CCTV") ? 7.5 : 6.5; 
 
     setState(() {
+      int currentTier = 0;
+
       if (complexityChange > t3Limit || structureDelta > (t3Limit * 1.5)) {
+        currentTier = 3;
         boxColor = Colors.redAccent;
-        driveStatus = "🚨 [${currentMode}] 3단계 긴급 경고!";
-        triggerTieredAlert("전방 급정체! 즉시 감속하세요!", 3);
+        driveStatus = "🚨 [$currentMode] 3단계 긴급 (데이터 기록중)";
+        triggerTieredAlert("전방 급정체! 즉시 감속하세요!", 3, globalLuma, complexityChange, structureDelta);
       } else if (complexityChange > t2Limit || structureDelta > (t2Limit * 1.5)) {
+        currentTier = 2;
         boxColor = Colors.orangeAccent;
-        driveStatus = "⚠️ [${currentMode}] 2단계 정체 주의";
-        triggerTieredAlert("전방 정체 구간, 속도를 줄이세요.", 2);
+        driveStatus = "⚠️ [$currentMode] 2단계 주의 (데이터 기록중)";
+        triggerTieredAlert("전방 정체 구간, 속도를 줄이세요.", 2, globalLuma, complexityChange, structureDelta);
       } else if (complexityChange > t1Limit || structureDelta > (t1Limit * 1.4)) {
+        currentTier = 1;
         boxColor = Colors.amber;
-        driveStatus = "⚡ [${currentMode}] 1단계 교통 혼잡";
-        triggerTieredAlert("전방 교통 혼잡, 주의하세요.", 1);
+        driveStatus = "⚡ [$currentMode] 1단계 혼잡 (데이터 기록중)";
+        triggerTieredAlert("전방 교통 혼잡, 주의하세요.", 1, globalLuma, complexityChange, structureDelta);
       } else {
         boxColor = Colors.greenAccent;
-        driveStatus = "[$currentMode] 정상 관제 대기 중";
+        driveStatus = "[$currentMode] 정상 관제 (학습 데이터 누적)";
         baselineStructure = (baselineStructure * 0.99) + (normalizedStructure * 0.01);
       }
       prevStructure = normalizedStructure;
     });
   }
 
-  void triggerTieredAlert(String speechText, int tier) {
+  void triggerTieredAlert(String speechText, int tier, double luma, double complexity, double structure) {
     final now = DateTime.now();
     int cooldown = (tier == 3) ? 8 : (tier == 2) ? 12 : 15;
 
@@ -224,7 +228,10 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
       }
 
       eventSaveCount++;
-      _driveLogSession.add("[$currentMode - 티어 $tier 경고 #$eventSaveCount] ${now.toIso8601String()} | $speechText");
+      
+      String timeStr = now.toIso8601String();
+      String dlLog = "$timeStr,$currentMode,${luma.toStringAsFixed(2)},${complexity.toStringAsFixed(2)},${structure.toStringAsFixed(2)},Tier_$tier,$speechText";
+      _dlDatasetLog.add(dlLog);
       
       Timer(Duration(seconds: cooldown), () {
         isSpeechLocked = false;
@@ -239,7 +246,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
     }
   }
 
-  Future<void> stopAndSaveLog() async {
+  Future<void> stopAndSaveDeepLearningData() async {
     if (controller == null || !isStreaming) return;
     try {
       try { await controller!.stopImageStream(); } catch (e) {}
@@ -249,14 +256,14 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
       final targetDir = Directory('/storage/emulated/0/DCIM/Camera');
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
 
-      final logFile = File('${targetDir.path}/VES_Integrated_Report_$timestamp.txt');
-      _driveLogSession.add("--------------------------------------------------");
-      _driveLogSession.add("종료 시각: ${DateTime.now().toIso8601String()}");
-      _driveLogSession.add("총 감지 횟수: $eventSaveCount건");
-      await logFile.writeAsString(_driveLogSession.join('\n'));
+      final logFile = File('${targetDir.path}/VES_ML_Dataset_$timestamp.csv');
+      _dlDatasetLog.add("--------------------------------------------------");
+      _dlDatasetLog.add("Session End: ${DateTime.now().toIso8601String()}");
+      _dlDatasetLog.add("Total Labeled Events: $eventSaveCount");
+      await logFile.writeAsString(_dlDatasetLog.join('\n'));
 
       setState(() {
-        driveStatus = "관제 종료 (통합 리포트 저장됨)";
+        driveStatus = "관제 종료 (딥러닝 데이터셋 저장 완료)";
         boxColor = Colors.grey;
       });
     } catch (e) {
@@ -313,7 +320,6 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
             ),
           ),
 
-          // 상단 상태바 및 모드 전환 버튼
           Positioned(
             top: 40, left: 15, right: 15,
             child: Container(
@@ -322,20 +328,19 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  // 모드 스위치 버튼 (탭하면 MONITOR <-> LIVE 전환)
                   GestureDetector(
                     onTap: () {
                       setState(() {
-                        currentMode = (currentMode == "MONITOR") ? "LIVE" : "MONITOR";
+                        currentMode = (currentMode == "CCTV") ? "LIVE" : "CCTV";
                       });
                     },
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(color: Colors.cyanAccent, borderRadius: BorderRadius.circular(4)),
-                      child: Text("모드: $currentMode", style: const TextStyle(color: Colors.black, fontSize: 11, fontWeight: FontWeight.bold)),
+                      child: Text("소스: $currentMode", style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.bold)),
                     ),
                   ),
-                  Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 11, fontWeight: FontWeight.bold)),
+                  Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 12, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
@@ -348,18 +353,18 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
               onPressed: () async {
                 if (isRunning) {
                   setState(() { isRunning = false; });
-                  await stopAndSaveLog();
+                  await stopAndSaveDeepLearningData();
                 } else {
                   setState(() {
                     isRunning = true;
-                    driveStatus = "VES 통합 관제 재가동";
+                    driveStatus = "VES 딥러닝 데이터 수집 재가동";
                     boxColor = Colors.greenAccent;
                   });
                   if (controller != null) {
                     controller!.startImageStream((CameraImage image) {
                       if (!isRunning) return;
                       final int now = DateTime.now().millisecondsSinceEpoch;
-                      int interval = (currentMode == "MONITOR") ? 600 : 400;
+                      int interval = (currentMode == "CCTV") ? 600 : 400;
                       if (now - lastFrameTime < interval) return;
                       if (isAnalyzingFrame) return;
                       
@@ -367,7 +372,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
                       isAnalyzingFrame = true;
                       
                       try {
-                        processMultiSourceFrame(image);
+                        processDeepLearningFrame(image);
                       } catch (e) {
                         debugPrint("Error: $e");
                       } finally {
@@ -378,7 +383,7 @@ class _VESIntegratedScreenState extends State<VESIntegratedScreen> {
                   setState(() { isStreaming = true; });
                 }
               },
-              child: Text(isRunning ? "■ 운행/분석 종료 및 리포트 저장" : "▶ 관제 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
+              child: Text(isRunning ? "■ 운행 종료 및 ML 데이터셋 저장" : "▶ AI 관제 다시 시작", style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),
         ],
