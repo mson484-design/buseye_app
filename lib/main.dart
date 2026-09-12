@@ -109,7 +109,6 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
 
     int step = 16; 
 
-    // [실차 최적화 ROI] 하늘을 제외하고 내 차 앞 전방 도로 영역만 집중 타겟팅
     int roiStartY = (height * 0.55).toInt();
     int roiEndY = (height * 0.85).toInt();
     int roiStartX = (width * 0.35).toInt();
@@ -133,7 +132,6 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
     
-    // 갑작스러운 조도 변화(터널 입출구, 구름 그림자) 필터링
     if (lumaDelta > 45.0) return; 
 
     for (int y = roiStartY; y < roiEndY; y += step) {
@@ -165,7 +163,6 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      // 차량 정차 또는 서행 시 화면 변화가 적을 때 정류장/신호대기 모드 진입
       if (normalizedStructure < 7.5) {
         isBusStopMode = true;
         boxColor = Colors.lightBlueAccent;
@@ -174,7 +171,6 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
       } else {
         isBusStopMode = false;
         
-        // 실차 주행 중 3단계 경고 시스템 (오작동/멘트 남발 원천 방지용 상향 문턱값 적용)
         if (complexityChange > 22.0 || structureDelta > 30.0) {
           boxColor = Colors.redAccent;
           driveStatus = "🚨 3단계 긴급 경고";
