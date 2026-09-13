@@ -24,7 +24,7 @@ if (flutterVersionName == null) {
 
 android {
     namespace "com.example.buseye_app"
-    compileSdkVersion 34
+    compileSdkVersion flutter.compileSdkVersion.toInteger()
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
@@ -37,8 +37,8 @@ android {
 
     defaultConfig {
         applicationId "com.example.buseye_app"
-        minSdkVersion flutter.minSdkVersion
-        targetSdkVersion 34
+        minSdkVersion flutter.minSdkVersion.toInteger()
+        targetSdkVersion flutter.targetSdkVersion.toInteger()
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
     }
@@ -52,7 +52,4 @@ android {
 
 flutter {
     source '../..'
-}
-
-dependencies {
 }
