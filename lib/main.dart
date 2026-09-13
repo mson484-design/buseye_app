@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -15,31 +16,31 @@ Future<void> main() async {
     debugPrint('Camera init error: $e');
   }
   runApp(const MaterialApp(
-    home: VESRealFieldScreen(),
+    home: VESSensorFusionScreen(),
     debugShowCheckedModeBanner: false,
   ));
 }
 
-class VESRealFieldScreen extends StatefulWidget {
-  const VESRealFieldScreen({Key? key}) : super(key: key);
+class VESSensorFusionScreen extends StatefulWidget {
+  const VESSensorFusionScreen({Key? key}) : super(key: key);
 
   @override
-  State<VESRealFieldScreen> createState() => _VESRealFieldScreenState();
+  State<VESSensorFusionScreen> createState() => _VESSensorFusionScreenState();
 }
 
-class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
+class _VESSensorFusionScreenState extends State<VESSensorFusionScreen> {
   CameraController? controller;
   FlutterTts flutterTts = FlutterTts();
 
   bool isRunning = true;
   bool isStreaming = false;
 
-  String driveStatus = "VES 실차 주행 관제 중";
+  String driveStatus = "VES 센서융합 관제 대기";
   Color boxColor = Colors.greenAccent;
 
   bool isSpeechLocked = false;
   DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
-  DateTime lastBusStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2));
+  DateTime lastStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2));
 
   bool isAnalyzingFrame = false;
   int lastFrameTime = 0;
@@ -48,12 +49,15 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
   double prevStructure = 0.0;
   double prevGlobalLuma = 128.0; 
 
-  bool isBusStopMode = false;
+  double currentZAccel = 0.0;
+  bool isVehicleBumping = false;
+  StreamSubscription<UserAccelerometerEvent>? _accelSubscription;
 
   @override
   void initState() {
     super.initState();
     initTTS();
+    initSensors();
     initCameraAndStart();
   }
 
@@ -61,6 +65,17 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     await flutterTts.setLanguage("ko-KR");
     await flutterTts.setSpeechRate(0.50);
     await flutterTts.setVolume(1.0);
+  }
+
+  void initSensors() {
+    _accelSubscription = userAccelerometerEvents.listen((UserAccelerometerEvent event) {
+      currentZAccel = event.z;
+      if (event.z.abs() > 3.5) {
+        isVehicleBumping = true;
+      } else {
+        isVehicleBumping = false;
+      }
+    });
   }
 
   Future<void> initCameraAndStart() async {
@@ -83,11 +98,19 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
           if (now - lastFrameTime < 400) return; 
           if (isAnalyzingFrame) return;
 
+          if (isVehicleBumping) {
+            setState(() {
+              driveStatus = "도로 진동 무시 중 (안정화)";
+              boxColor = Colors.grey;
+            });
+            return;
+          }
+
           lastFrameTime = now;
           isAnalyzingFrame = true;
           
           try {
-            processRealFieldFrame(image);
+            processSensorFusionFrame(image);
           } catch (e) {
             debugPrint("Frame Error: $e");
           } finally {
@@ -101,7 +124,7 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     }
   }
 
-  void processRealFieldFrame(CameraImage image) {
+  void processSensorFusionFrame(CameraImage image) {
     final Uint8List yPlane = image.planes[0].bytes;
     final int width = image.width;
     final int height = image.height;
@@ -109,10 +132,10 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
 
     int step = 16; 
 
-    int roiStartY = (height * 0.55).toInt();
+    int roiStartY = (height * 0.70).toInt();
     int roiEndY = (height * 0.85).toInt();
-    int roiStartX = (width * 0.35).toInt();
-    int roiEndX = (width * 0.65).toInt();
+    int roiStartX = (width * 0.20).toInt();
+    int roiEndX = (width * 0.80).toInt();
 
     int edgeSum = 0;
     int sampleCount = 0;
@@ -132,7 +155,7 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     double lumaDelta = (globalLuma - prevGlobalLuma).abs();
     prevGlobalLuma = globalLuma;
     
-    if (lumaDelta > 45.0) return; 
+    if (lumaDelta > 40.0) return; 
 
     for (int y = roiStartY; y < roiEndY; y += step) {
       for (int x = roiStartX; x < roiEndX; x += step) {
@@ -163,26 +186,23 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      if (normalizedStructure < 7.5) {
-        isBusStopMode = true;
+      if (normalizedStructure < 7.0) {
         boxColor = Colors.lightBlueAccent;
-        driveStatus = "정차/서행 (정류장 감시 활성)";
-        triggerAutoBusStopAlert();
+        driveStatus = "정차 / 서행 구간 관제";
+        triggerStopAlert();
       } else {
-        isBusStopMode = false;
-        
         if (complexityChange > 22.0 || structureDelta > 30.0) {
           boxColor = Colors.redAccent;
-          driveStatus = "🚨 3단계 긴급 경고";
-          triggerAlert("전방 급정체! 즉시 감속하세요!", 3);
-        } else if (complexityChange > 14.0 || structureDelta > 19.0) {
+          driveStatus = "🚨 3단계 긴급 경고 (센서융합)";
+          triggerAlert("전방 급정체 위험! 즉시 감속하세요!", 3);
+        } else if (complexityChange > 13.0 || structureDelta > 18.0) {
           boxColor = Colors.orangeAccent;
           driveStatus = "⚠️ 2단계 정체 주의";
-          triggerAlert("전방 정체 구간, 속도를 줄이세요.", 2);
-        } else if (complexityChange > 8.0 || structureDelta > 11.0) {
+          triggerAlert("전방 정체 구간, 주의하세요.", 2);
+        } else if (complexityChange > 7.0 || structureDelta > 11.0) {
           boxColor = Colors.amber;
           driveStatus = "⚡ 1단계 교통 혼잡";
-          triggerAlert("전방 교통 혼잡, 주의하세요.", 1);
+          triggerAlert("전방 교통 혼잡 구간입니다.", 1);
         } else {
           boxColor = Colors.greenAccent;
           driveStatus = "정상 주행 관제 중";
@@ -205,18 +225,19 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
     }
   }
 
-  void triggerAutoBusStopAlert() {
+  void triggerStopAlert() {
     final now = DateTime.now();
-    if (!isSpeechLocked && now.difference(lastBusStopSpokenTime).inSeconds >= 120) {
+    if (!isSpeechLocked && now.difference(lastStopSpokenTime).inSeconds >= 120) {
       isSpeechLocked = true;
-      lastBusStopSpokenTime = now;
-      flutterTts.speak("정차 구간입니다. 승객 승하차에 주의하세요.");
+      lastStopSpokenTime = now;
+      flutterTts.speak("정차 구간입니다. 주변 안전에 유의하세요.");
       Timer(const Duration(seconds: 8), () { isSpeechLocked = false; });
     }
   }
 
   @override
   void dispose() {
+    _accelSubscription?.cancel();
     if (controller != null && isStreaming) { controller!.stopImageStream(); }
     controller?.dispose();
     flutterTts.stop();
@@ -236,32 +257,17 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
           SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
           
           Align(
-            alignment: const Alignment(0, 0.40),
+            alignment: const Alignment(0, 0.55),
             child: Container(
-              width: size.width * 0.35, height: size.height * 0.25,
-              decoration: BoxDecoration(border: Border.all(color: boxColor, width: 2.5), borderRadius: BorderRadius.circular(8)),
-            ),
-          ),
-
-          if (isBusStopMode)
-            Align(
-              alignment: const Alignment(0.85, 0.40),
-              child: Container(
-                width: size.width * 0.25, height: size.height * 0.40,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.lightBlueAccent, width: 3.0),
-                  color: Colors.lightBlueAccent.withOpacity(0.2),
-                ),
-                child: const Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.directions_bus, color: Colors.white, size: 40),
-                    SizedBox(height: 8),
-                    Text("승객 스캔 활성", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
-                  ],
-                ),
+              width: size.width * 0.60, 
+              height: size.height * 0.15,
+              decoration: BoxDecoration(
+                border: Border.all(color: boxColor, width: 2.5),
+                borderRadius: BorderRadius.circular(6),
+                color: boxColor.withOpacity(0.1),
               ),
             ),
+          ),
 
           Positioned(
             top: 40, left: 15, right: 15,
@@ -271,7 +277,7 @@ class _VESRealFieldScreenState extends State<VESRealFieldScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("VES 실차 관제 모드", style: TextStyle(color: Colors.cyanAccent, fontSize: 15, fontWeight: FontWeight.bold)),
+                  const Text("VES 센서융합 관제", style: TextStyle(color: Colors.cyanAccent, fontSize: 15, fontWeight: FontWeight.bold)),
                   Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
