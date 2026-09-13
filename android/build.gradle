@@ -1,3 +1,9 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
@@ -16,14 +22,10 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
-
-
 android {
-    compileSdkVersion 36
-    ndkVersion flutter.ndkVersion
+    namespace "com.example.buseye_app"
+    compileSdkVersion 34
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
@@ -34,8 +36,8 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.buseye.safety"
-        minSdkVersion 21
+        applicationId "com.example.buseye_app"
+        minSdkVersion flutter.minSdkVersion
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
@@ -52,4 +54,5 @@ flutter {
     source '../..'
 }
 
-dependencies {}
+dependencies {
+}
