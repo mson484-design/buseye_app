@@ -11,8 +11,9 @@ dependencies:
     sdk: flutter
   camera: ^0.10.5
   flutter_tts: ^3.8.3
- sensors_plus: ^5.0.1  # 
-  geolocator: ^10.1.0  # 
+  geolocator: ^10.1.0
+  sensors_plus: ^5.0.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
