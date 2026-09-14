@@ -24,6 +24,11 @@ jobs:
       with:
         channel: 'stable'
 
+    - name: Clean & Recreate Android Standard Files
+      run: |
+        rm -rf android
+        flutter create . --platforms=android --org com.example
+
     - name: Get Dependencies
       run: flutter pub get
 
