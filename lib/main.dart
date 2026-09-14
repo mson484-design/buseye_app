@@ -3,7 +3,6 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'dart:async';
-import 'dart:math';
 
 void main() {
   runApp(const BusEyeApp());
@@ -16,7 +15,7 @@ class BusEyeApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'BusEye Safety System',
-      theme: ThemeData(primarySwatch: FontWeight.blue),
+      theme: ThemeData(primarySwatch: Colors.blue),
       home: const SafetyMonitorScreen(),
     );
   }
@@ -32,16 +31,12 @@ class SafetyMonitorScreen extends StatefulWidget {
 class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
   final FlutterTts _flutterTts = FlutterTts();
 
-  // 센서 및 위치 데이터
   double _accelX = 0, _accelY = 0, _accelZ = 0;
-  double _currentSpeed = 0.0; // km/h
-  double _heading = 0.0;     // 차량 진행 방향 (degrees)
+  double _currentSpeed = 0.0;
+  double _heading = 0.0;
 
-  // 탐지 영역별 객체 상태 (시뮬레이션용 데이터)
-  // 객체 구조: [거리(m), 방향각(차량 기준 상대각도), 이동방향(순방향/반대방향), 속도, 객체유형]
   List<Map<String, dynamic>> _detectedObjects = [];
 
-  // 경고 상태 관리
   String _currentAlertLevel = '안전';
   Color _statusColor = Colors.green;
   DateTime? _lastSpokenTime;
@@ -54,7 +49,7 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
     super.initState();
     _initTts();
     _initSensors();
-    _startSimulationTimer(); // 센서 융합 기반 가상 객체 탐지 시뮬레이션
+    _startSimulationTimer();
   }
 
   Future<void> _initTts() async {
@@ -63,7 +58,6 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
   }
 
   void _initSensors() {
-    // 1. 가속도 센서 (급정거, 충돌 감지 융합)
     _accelSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
       setState(() {
         _accelX = event.x;
@@ -72,7 +66,6 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
       });
     });
 
-    // 2. GPS 위치 및 속도, 방위각 수신
     _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationSettingsAccuracy.high,
@@ -80,7 +73,7 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
       ),
     ).listen((Position position) {
       setState(() {
-        _currentSpeed = position.speed * 3.6; // m/s를 km/h로 변환
+        _currentSpeed = position.speed * 3.6;
         if (position.heading != 0) {
           _heading = position.heading;
         }
@@ -88,10 +81,9 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
     });
   }
 
-  // 센서 융합 및 위험 판정 로직
   void _startSimulationTimer() {
     Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      // 테스트를 위한 가상 객체 데이터 생성 (사각/넓은영역 및 반대방향 시뮬레이션)
+      if (!mounted) return;
       List<Map<String, dynamic>> simulatedObjects = [
         {'id': 1, 'distance': 8.5, 'angle': 5.0, 'isOpposing': false, 'speed': 45.0, 'name': '전방 차량'},
         {'id': 2, 'distance': 3.2, 'angle': -45.0, 'isOpposing': false, 'speed': 10.0, 'name': '사각지대 측면 보행자'},
@@ -110,23 +102,19 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
 
     for (var obj in objects) {
       double distance = obj['distance'];
-      double angle = obj['angle']; // -180 ~ 180 (0이 정면, 양수 우측, 음수 좌측)
+      double angle = obj['angle'];
       bool isOpposing = obj['isOpposing'];
 
-      // 영역 분류: 사각(측후방), 넓은영역(전방/광각)
       bool isBlindSpot = (angle.abs() > 30 && angle.abs() < 120) && distance < 5.0;
       bool isWideArea = distance <= 15.0;
 
       if (!isWideArea && !isBlindSpot) continue;
 
-      // 규칙 1: 반대방향(대향 차량) 처리
       if (isOpposing) {
-        // 반대방향 정상 객체는 무시 (진행 방향 벡터가 반대이면서 정상 궤도인 경우)
-        bool isDangerousOpposing = (angle.abs() > 140 && distance < 8.0); // 중앙선 침범 등 비정상 접근
+        bool isDangerousOpposing = (angle.abs() > 140 && distance < 8.0);
         if (!isDangerousOpposing) {
-          continue; // 정상적인 반대방향 객체 무시
+          continue;
         } else {
-          // 반대방향 추돌 위험 경고
           highestAlert = '위험 (반대방향 충돌 임박)';
           alertColor = Colors.red;
           alertMessage = '반대차선 위험 접근! 주의하세요!';
@@ -134,25 +122,21 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
         }
       }
 
-      // 규칙 2: 모든 객체의 비정상적인 추돌 위험 시 3단계 경고 시스템
       if (distance < 4.0 || isBlindSpot) {
-        // 3단계: 심각 위험 (즉시 제동 필요)
         highestAlert = '3단계 경고: 심각 위험';
         alertColor = Colors.red;
         alertMessage = '충돌 위험! 즉시 브레이크!';
         break;
       } else if (distance < 8.0) {
-        // 2단계: 경고 (주의 관찰)
         if (highestAlert != '3단계 경고: 심각 위험') {
           highestAlert = '2단계 경고: 주의';
           alertColor = Colors.orange;
           alertMessage = '측후방 사각 및 전방 주의';
         }
       } else if (distance < 15.0) {
-        // 1단계: 인지 (관심)
         if (highestAlert == '안전') {
           highestAlert = '1단계 경고: 인지';
-          alertColor = Colors.yellow.shade700;
+          alertColor = Colors.amber;
           alertMessage = '주변 객체 접근 중';
         }
       }
@@ -164,7 +148,6 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
       _statusColor = alertColor;
     });
 
-    // 음성 경고 출력 (쿨타임 적용)
     if (alertMessage.isNotEmpty) {
       _speakAlert(alertMessage);
     }
@@ -198,7 +181,6 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 상태 표시 카드
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
@@ -221,9 +203,8 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
               ),
             ),
             const SizedBox(height: 20),
-            const Text('탐지된 주변 객체 리스트 (사각/광각/반대방향 필터링 적용)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text('탐지된 주변 객체 리스트', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 10),
-            // 객체 리스트뷰
             Expanded(
               child: ListView.builder(
                 itemCount: _detectedObjects.length,
@@ -233,7 +214,6 @@ class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
                   double distance = obj['distance'];
                   double angle = obj['angle'];
 
-                  // 필터링 상태 표시용
                   String statusText = '정상 추적';
                   Color textColor = Colors.black;
 
