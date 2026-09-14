@@ -1,4 +1,4 @@
-name: Build BusEye APK
+name: Build VES APK
 
 on:
   push:
@@ -27,7 +27,12 @@ jobs:
     - name: Clean & Recreate Android Standard Files
       run: |
         rm -rf android
-        flutter create . --platforms=android --org com.example
+        flutter create . --platforms=android --org com.ves
+
+    - name: Update Compile SDK to 36
+      run: |
+        sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/g' android/app/build.gradle || true
+        sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/g' android/app/build.gradle || true
 
     - name: Get Dependencies
       run: flutter pub get
