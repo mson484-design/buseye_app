@@ -1,246 +1,271 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_tts/flutter_tts.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:sensors_plus/sensors_plus.dart';
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
-void main() {
-  runApp(const BusEyeApp());
-}
+List<CameraDescription> cameras = [];
 
-class BusEyeApp extends StatelessWidget {
-  const BusEyeApp({Key? key}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'BusEye Safety System',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: const SafetyMonitorScreen(),
-    );
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    cameras = await availableCameras();
+  } catch (e) {
+    debugPrint('Camera init error: $e');
   }
+  runApp(const MaterialApp(
+    home: VESWideFieldScreen(),
+    debugShowCheckedModeBanner: false,
+  ));
 }
 
-class SafetyMonitorScreen extends StatefulWidget {
-  const SafetyMonitorScreen({Key? key}) : super(key: key);
+class VESWideFieldScreen extends StatefulWidget {
+  const VESWideFieldScreen({Key? key}) : super(key: key);
 
   @override
-  State<SafetyMonitorScreen> createState() => _SafetyMonitorScreenState();
+  State<VESWideFieldScreen> createState() => _VESWideFieldScreenState();
 }
 
-class _SafetyMonitorScreenState extends State<SafetyMonitorScreen> {
-  final FlutterTts _flutterTts = FlutterTts();
+class _VESWideFieldScreenState extends State<VESWideFieldScreen> {
+  CameraController? controller;
+  FlutterTts flutterTts = FlutterTts();
 
-  double _accelX = 0, _accelY = 0, _accelZ = 0;
-  double _currentSpeed = 0.0;
-  double _heading = 0.0;
+  bool isRunning = true;
+  bool isStreaming = false;
 
-  List<Map<String, dynamic>> _detectedObjects = [];
+  String driveStatus = "VES 와이드 실차 관제 대기";
+  Color boxColor = Colors.greenAccent;
 
-  String _currentAlertLevel = '안전';
-  Color _statusColor = Colors.green;
-  DateTime? _lastSpokenTime;
+  bool isSpeechLocked = false;
+  DateTime lastSpokenTime = DateTime.now().subtract(const Duration(seconds: 30));
+  DateTime lastStopSpokenTime = DateTime.now().subtract(const Duration(minutes: 2));
 
-  StreamSubscription? _accelSubscription;
-  StreamSubscription? _positionSubscription;
+  bool isAnalyzingFrame = false;
+  int lastFrameTime = 0;
+
+  double baselineStructure = 0.0;
+  double prevStructure = 0.0;
+  double prevGlobalLuma = 128.0; 
+
+  bool isSlowOrStopMode = false;
 
   @override
   void initState() {
     super.initState();
-    _initTts();
-    _initSensors();
-    _startSimulationTimer();
+    initTTS();
+    initCameraAndStart();
   }
 
-  Future<void> _initTts() async {
-    await _flutterTts.setLanguage("ko-KR");
-    await _flutterTts.setSpeechRate(1.0);
+  void initTTS() async {
+    await flutterTts.setLanguage("ko-KR");
+    await flutterTts.setSpeechRate(0.50);
+    await flutterTts.setVolume(1.0);
   }
 
-  void _initSensors() {
-    _accelSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
-      setState(() {
-        _accelX = event.x;
-        _accelY = event.y;
-        _accelZ = event.z;
-      });
-    });
+  Future<void> initCameraAndStart() async {
+    if (cameras.isNotEmpty) {
+      controller = CameraController(
+        cameras[0],
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
 
-    _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationSettingsAccuracy.high,
-        distanceFilter: 1,
-      ),
-    ).listen((Position position) {
-      setState(() {
-        _currentSpeed = position.speed * 3.6;
-        if (position.heading != 0) {
-          _heading = position.heading;
-        }
-      });
-    });
-  }
+      try {
+        await controller!.initialize();
+        if (!mounted) return;
+        setState(() {});
 
-  void _startSimulationTimer() {
-    Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      if (!mounted) return;
-      List<Map<String, dynamic>> simulatedObjects = [
-        {'id': 1, 'distance': 8.5, 'angle': 5.0, 'isOpposing': false, 'speed': 45.0, 'name': '전방 차량'},
-        {'id': 2, 'distance': 3.2, 'angle': -45.0, 'isOpposing': false, 'speed': 10.0, 'name': '사각지대 측면 보행자'},
-        {'id': 3, 'distance': 12.0, 'angle': 160.0, 'isOpposing': true, 'speed': 60.0, 'name': '반대차선 정상 주행 차량'},
-        {'id': 4, 'distance': 6.0, 'angle': -170.0, 'isOpposing': true, 'speed': 75.0, 'name': '반대차선 중앙선 침범 차량'},
-      ];
+        controller!.startImageStream((CameraImage image) {
+          if (!isRunning) return;
+          final int now = DateTime.now().millisecondsSinceEpoch;
+          
+          if (now - lastFrameTime < 400) return; 
+          if (isAnalyzingFrame) return;
 
-      _processSensorFusion(simulatedObjects);
-    });
-  }
-
-  void _processSensorFusion(List<Map<String, dynamic>> objects) {
-    String highestAlert = '안전';
-    Color alertColor = Colors.green;
-    String alertMessage = '';
-
-    for (var obj in objects) {
-      double distance = obj['distance'];
-      double angle = obj['angle'];
-      bool isOpposing = obj['isOpposing'];
-
-      bool isBlindSpot = (angle.abs() > 30 && angle.abs() < 120) && distance < 5.0;
-      bool isWideArea = distance <= 15.0;
-
-      if (!isWideArea && !isBlindSpot) continue;
-
-      if (isOpposing) {
-        bool isDangerousOpposing = (angle.abs() > 140 && distance < 8.0);
-        if (!isDangerousOpposing) {
-          continue;
-        } else {
-          highestAlert = '위험 (반대방향 충돌 임박)';
-          alertColor = Colors.red;
-          alertMessage = '반대차선 위험 접근! 주의하세요!';
-          break;
-        }
+          lastFrameTime = now;
+          isAnalyzingFrame = true;
+          
+          try {
+            processWideFieldFrame(image);
+          } catch (e) {
+            debugPrint("Frame Error: $e");
+          } finally {
+            isAnalyzingFrame = false; 
+          }
+        });
+        setState(() { isStreaming = true; });
+      } catch (e) {
+        debugPrint("Camera Start Error: $e");
       }
+    }
+  }
 
-      if (distance < 4.0 || isBlindSpot) {
-        highestAlert = '3단계 경고: 심각 위험';
-        alertColor = Colors.red;
-        alertMessage = '충돌 위험! 즉시 브레이크!';
-        break;
-      } else if (distance < 8.0) {
-        if (highestAlert != '3단계 경고: 심각 위험') {
-          highestAlert = '2단계 경고: 주의';
-          alertColor = Colors.orange;
-          alertMessage = '측후방 사각 및 전방 주의';
-        }
-      } else if (distance < 15.0) {
-        if (highestAlert == '안전') {
-          highestAlert = '1단계 경고: 인지';
-          alertColor = Colors.amber;
-          alertMessage = '주변 객체 접근 중';
+  void processWideFieldFrame(CameraImage image) {
+    final Uint8List yPlane = image.planes[0].bytes;
+    final int width = image.width;
+    final int height = image.height;
+    final int rowStride = image.planes[0].bytesPerRow;
+
+    int step = 16; 
+
+    // [와이드 스트립 ROI 세팅] 세로는 얇게(하늘/보닛 제외), 가로는 넓게(양옆 차선 포함)
+    int roiStartY = (height * 0.70).toInt();
+    int roiEndY = (height * 0.85).toInt();
+    int roiStartX = (width * 0.20).toInt();
+    int roiEndX = (width * 0.80).toInt();
+
+    int edgeSum = 0;
+    int sampleCount = 0;
+    int globalSum = 0;
+    int globalCount = 0;
+
+    for (int y = 0; y < height; y += step * 4) {
+      for (int x = 0; x < width; x += step * 4) {
+        int index = (y * rowStride) + x;
+        if (index < yPlane.length) {
+          globalSum += yPlane[index];
+          globalCount++;
         }
       }
     }
+    double globalLuma = globalCount > 0 ? globalSum / globalCount : 128.0;
+    double lumaDelta = (globalLuma - prevGlobalLuma).abs();
+    prevGlobalLuma = globalLuma;
+    
+    // 급격한 조도 변화(터널, 그림자) 필터링
+    if (lumaDelta > 45.0) return; 
+
+    for (int y = roiStartY; y < roiEndY; y += step) {
+      for (int x = roiStartX; x < roiEndX; x += step) {
+        int currentIndex = (y * rowStride) + x;
+        int nextYIndex = ((y + step) * rowStride) + x;
+
+        if (nextYIndex < yPlane.length) {
+          int diff = (yPlane[currentIndex] - yPlane[nextYIndex]).abs();
+          edgeSum += diff;
+          sampleCount++;
+        }
+      }
+    }
+
+    if (sampleCount == 0) return;
+
+    double rawStructure = edgeSum / sampleCount;
+    double normalizedStructure = rawStructure * (120.0 / (globalLuma + 50.0));
+
+    if (baselineStructure == 0.0) {
+      baselineStructure = normalizedStructure;
+      prevStructure = normalizedStructure;
+      return;
+    }
+
+    double structureDelta = normalizedStructure - baselineStructure;
+    if (structureDelta < 0) structureDelta = 0.0;
+    double complexityChange = (normalizedStructure - prevStructure).abs();
 
     setState(() {
-      _detectedObjects = objects;
-      _currentAlertLevel = highestAlert;
-      _statusColor = alertColor;
+      if (normalizedStructure < 7.0) {
+        isSlowOrStopMode = true;
+        boxColor = Colors.lightBlueAccent;
+        driveStatus = "정차 / 서행 구간 감시";
+        triggerStopAlert();
+      } else {
+        isSlowOrStopMode = false;
+        
+        if (complexityChange > 20.0 || structureDelta > 28.0) {
+          boxColor = Colors.redAccent;
+          driveStatus = "🚨 3단계 긴급 경고";
+          triggerAlert("전방 급정체! 즉시 감속하세요!", 3);
+        } else if (complexityChange > 12.0 || structureDelta > 17.0) {
+          boxColor = Colors.orangeAccent;
+          driveStatus = "⚠️ 2단계 정체 주의";
+          triggerAlert("전방 정체 구간, 속도를 줄이세요.", 2);
+        } else if (complexityChange > 7.0 || structureDelta > 10.0) {
+          boxColor = Colors.amber;
+          driveStatus = "⚡ 1단계 교통 혼잡";
+          triggerAlert("전방 교통 혼잡, 주의하세요.", 1);
+        } else {
+          boxColor = Colors.greenAccent;
+          driveStatus = "정상 주행 관제 중";
+          baselineStructure = (baselineStructure * 0.99) + (normalizedStructure * 0.01);
+        }
+      }
+      prevStructure = normalizedStructure;
     });
+  }
 
-    if (alertMessage.isNotEmpty) {
-      _speakAlert(alertMessage);
+  void triggerAlert(String text, int tier) {
+    final now = DateTime.now();
+    int cooldown = (tier == 3) ? 8 : (tier == 2) ? 15 : 20;
+
+    if (!isSpeechLocked && now.difference(lastSpokenTime).inSeconds >= cooldown) {
+      isSpeechLocked = true;
+      lastSpokenTime = now;
+      flutterTts.speak(text);
+      Timer(Duration(seconds: cooldown), () { isSpeechLocked = false; });
     }
   }
 
-  void _speakAlert(String message) async {
+  void triggerStopAlert() {
     final now = DateTime.now();
-    if (_lastSpokenTime == null || now.difference(_lastSpokenTime!).inSeconds > 2) {
-      _lastSpokenTime = now;
-      await _flutterTts.speak(message);
+    if (!isSpeechLocked && now.difference(lastStopSpokenTime).inSeconds >= 120) {
+      isSpeechLocked = true;
+      lastStopSpokenTime = now;
+      flutterTts.speak("정차 구간입니다. 주변 안전에 주의하세요.");
+      Timer(const Duration(seconds: 8), () { isSpeechLocked = false; });
     }
   }
 
   @override
   void dispose() {
-    _accelSubscription?.cancel();
-    _positionSubscription?.cancel();
-    _flutterTts.stop();
+    if (controller != null && isStreaming) { controller!.stopImageStream(); }
+    controller?.dispose();
+    flutterTts.stop();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (controller == null || !controller!.value.isInitialized) {
+      return const Scaffold(backgroundColor: Colors.black, body: Center(child: CircularProgressIndicator(color: Colors.cyanAccent)));
+    }
+    final size = MediaQuery.of(context).size;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('BusEye 센서 융합 관제 시스템'),
-        backgroundColor: _statusColor,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          SizedBox(width: size.width, height: size.height, child: CameraPreview(controller!)),
+          
+          // [화면 UI 가이드] 코드 내 ROI 영역(가로 20%~80%, 세로 70%~85%)과 일치하는 와이드 스트립 박스
+          Align(
+            alignment: const Alignment(0, 0.55),
+            child: Container(
+              width: size.width * 0.60, 
+              height: size.height * 0.15,
               decoration: BoxDecoration(
-                color: _statusColor.withOpacity(0.2),
-                border: Border.all(color: _statusColor, width: 3),
-                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: boxColor, width: 2.5),
+                borderRadius: BorderRadius.circular(6),
+                color: boxColor.withOpacity(0.1),
               ),
-              child: Column(
+            ),
+          ),
+
+          Positioned(
+            top: 40, left: 15, right: 15,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(10), border: Border.all(color: boxColor, width: 1.5)),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('현재 통합 위험 단계', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  Text(
-                    _currentAlertLevel,
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: _statusColor),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 10),
-                  Text('차량 속도: ${_currentSpeed.toStringAsFixed(1)} km/h', style: const TextStyle(fontSize: 16)),
+                  const Text("VES 와이드 관제", style: TextStyle(color: Colors.cyanAccent, fontSize: 15, fontWeight: FontWeight.bold)),
+                  Text(driveStatus, style: TextStyle(color: boxColor, fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
-            const SizedBox(height: 20),
-            const Text('탐지된 주변 객체 리스트', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _detectedObjects.length,
-                itemBuilder: (context, index) {
-                  final obj = _detectedObjects[index];
-                  bool isOpposing = obj['isOpposing'];
-                  double distance = obj['distance'];
-                  double angle = obj['angle'];
-
-                  String statusText = '정상 추적';
-                  Color textColor = Colors.black;
-
-                  if (isOpposing && angle.abs() <= 140) {
-                    statusText = '반대방향 정상 (무시됨)';
-                    textColor = Colors.grey;
-                  } else if (distance < 5.0) {
-                    statusText = '위험 영역 (경고 대상)';
-                    textColor = Colors.red;
-                  }
-
-                  return Card(
-                    child: ListTile(
-                      leading: Icon(
-                        isOpposing ? Icons.compare_arrows : Icons.radar,
-                        color: textColor,
-                      ),
-                      title: Text(obj['name'], style: TextStyle(color: textColor, fontWeight: FontWeight.bold)),
-                      subtitle: Text('거리: ${distance}m | 각도: ${angle}° | 속도: ${obj['speed']}km/h'),
-                      trailing: Text(statusText, style: TextStyle(color: textColor, fontSize: 12)),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
