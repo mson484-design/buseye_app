@@ -61,35 +61,27 @@ class _VesMainScreenState extends State<VesMainScreen> {
   }
 
   Future<void> _startSystem() async {
-    // 1. 권한 요청
     await [Permission.camera, Permission.location].request();
 
-    // 2. TTS 초기화
     try {
       await _tts.setLanguage("ko-KR");
       await _tts.setSpeechRate(0.5);
     } catch (_) {}
 
-    // 3. 카메라 연결
     if (_cameras.isNotEmpty) {
       _cameraController = CameraController(
         _cameras[0],
-        ResolutionPreset.medium, // 부하를 줄이기 위해 medium으로 안정화
+        ResolutionPreset.medium,
         enableAudio: false,
       );
       try {
         await _cameraController!.initialize();
-        if (mounted) {
-          setState(() {
-            _isReady = true;
-          });
-        }
+        if (mounted) setState(() => _isReady = true);
       } catch (e) {
         debugPrint("카메라 열기 실패: $e");
       }
     }
 
-    // 4. GPS 속도 측정 (안전 모드)
     try {
       _posSub = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
@@ -110,14 +102,11 @@ class _VesMainScreenState extends State<VesMainScreen> {
       debugPrint("위치 센서 오류: $e");
     }
 
-    // 5. 급감속/충격 센서 감지 (과부하 방지 쓰로틀링 적용)
     _sensorSub = accelerometerEventStream().listen((AccelerometerEvent e) {
       final now = DateTime.now();
-      // 0.3초마다 한 번씩만 계산하여 멈춤 현상 차단
       if (now.difference(_lastSensorUpdate).inMilliseconds < 300) return;
       _lastSensorUpdate = now;
 
-      // 흔들림 또는 충격 감지 임계치
       if (e.x.abs() > 6.0 || e.y.abs() > 6.0 || (e.z.abs() - 9.8).abs() > 6.0) {
         _triggerAlert("급감속/충격 주의!", Colors.redAccent, "주의하세요");
       }
@@ -134,7 +123,6 @@ class _VesMainScreenState extends State<VesMainScreen> {
 
     _tts.speak(voiceMsg);
 
-    // 3초 후 다시 '안전 운행 중'으로 자동 복귀
     _recoveryTimer?.cancel();
     _recoveryTimer = Timer(const Duration(seconds: 3), () {
       if (mounted) {
@@ -163,7 +151,7 @@ class _VesMainScreenState extends State<VesMainScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 1. 카메라 화면
+          // 1. 실시간 카메라 화면
           if (_isReady && _cameraController != null && _cameraController!.value.isInitialized)
             Center(
               child: CameraPreview(_cameraController!),
@@ -175,55 +163,72 @@ class _VesMainScreenState extends State<VesMainScreen> {
                 children: [
                   CircularProgressIndicator(color: Colors.greenAccent),
                   SizedBox(height: 16),
-                  Text(
-                    "관제 시스템 연결 중...",
-                    style: TextStyle(color: Colors.white70, fontSize: 18),
-                  ),
+                  Text("관제 시스템 준비 중...", style: TextStyle(color: Colors.white70, fontSize: 18)),
                 ],
               ),
             ),
 
-          // 2. 상단 관제 안내 직사각형 바 (고정 오버레이)
+          // 2. 화면 좌우를 가득 채우는 와이드 직사각형 HUD 바
           SafeArea(
             child: Align(
               alignment: Alignment.topCenter,
               child: Container(
                 width: double.infinity,
-                margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.black.withOpacity(0.75),
+                  borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: _statusColor, width: 2.5),
                   boxShadow: [
                     BoxShadow(
-                      color: _statusColor.withOpacity(0.3),
+                      color: _statusColor.withOpacity(0.25),
                       blurRadius: 10,
-                      spreadRadius: 2,
+                      spreadRadius: 1,
                     )
                   ],
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      _statusText,
-                      style: TextStyle(
-                        color: _statusColor,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.2,
-                      ),
+                    // 왼쪽: 관제 상태 문구
+                    Row(
+                      children: [
+                        Icon(Icons.shield, color: _statusColor, size: 26),
+                        const SizedBox(width: 8),
+                        Text(
+                          _statusText,
+                          style: TextStyle(
+                            color: _statusColor,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '${_speed.toStringAsFixed(1)} km/h',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 34,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.5,
-                      ),
+                    // 오른쪽: GPS 대형 속도계
+                    Row(
+                      crossAxisAlignment: CrossAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          _speed.toStringAsFixed(1),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 32,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Text(
+                          'km/h',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
