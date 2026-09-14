@@ -1,5 +1,5 @@
-name: buseye_app
-description: "BusEye In-Vehicle Safety System"
+name: ves
+description: "Vehicle Safety System"
 publish_to: 'none'
 version: 1.0.0+1
 
