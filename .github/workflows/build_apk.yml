@@ -24,23 +24,8 @@ jobs:
       with:
         channel: 'stable'
 
-    - name: Clean & Recreate Android Standard Files
-      run: |
-        # 1. 구형 안드로이드 폴더 완전 정리 및 표준 v2 뼈대 자동 재생성
-        rm -rf android/
-        flutter create . --platforms=android --org com.buseye.safety
-
-        # 2. 버스아이 필수 권한(카메라, 위치) 자동 주입
-        sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' android/app/src/main/AndroidManifest.xml
-
-    - name: Install Dependencies
+    - name: Get Dependencies
       run: flutter pub get
 
     - name: Build Release APK
-      run: flutter build apk --release --no-tree-shake-icons
-
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: buseye-release-apk
-        path: build/app/outputs/flutter-apk/app-release.apk
+      run: flutter build apk --release
